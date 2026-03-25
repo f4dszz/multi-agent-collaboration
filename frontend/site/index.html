@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Local Agent Workflow Orchestrator</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="page">
+      <section class="hero">
+        <div>
+          <p class="eyebrow">Local Agent Workflow Orchestrator</p>
+          <h1>Codex + Claude Code 本地协作控制台</h1>
+          <p class="lead">
+            这个页面不再让你翻邮件式文档，而是直接看 provider 状态、计划协作产物、review
+            findings、timeline 和命令执行结果。
+          </p>
+        </div>
+        <div class="status-panel">
+          <div class="status-row">
+            <span>Backend</span>
+            <strong id="backend-status">checking</strong>
+          </div>
+          <div class="status-row">
+            <span>Workspace</span>
+            <strong id="workspace-label">-</strong>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <h2>Providers</h2>
+          <button id="refresh-providers" type="button">刷新</button>
+        </div>
+        <div id="providers" class="provider-grid"></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <h2>Plan Cycle Demo</h2>
+        </div>
+        <form id="plan-form" class="form-grid">
+          <label>
+            <span>Workspace</span>
+            <input id="workspace" name="workspace" type="text" />
+          </label>
+          <label>
+            <span>Executor</span>
+            <select id="executor-provider" name="executor_provider"></select>
+          </label>
+          <label>
+            <span>Reviewer</span>
+            <select id="reviewer-provider" name="reviewer_provider"></select>
+          </label>
+          <label>
+            <span>Verifier</span>
+            <select id="verifier-provider" name="verifier_provider"></select>
+          </label>
+          <label class="wide">
+            <span>Task</span>
+            <textarea id="task" name="task" rows="7">为一个本地多 agent 编排器实现第一版：接入 Codex CLI 和 Claude Code CLI，要求能做计划草案、严格 review、必要时 verifier 仲裁，并让用户在页面中查看 timeline、findings、产物和命令执行结果。</textarea>
+          </label>
+          <label class="inline">
+            <input id="auto-revision" name="auto_revision" type="checkbox" checked />
+            <span>Reviewer 要求修订时，自动让 Executor 再出一版修订稿</span>
+          </label>
+          <div class="actions">
+            <button type="submit">运行一轮计划协作</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <h2>Latest Run</h2>
+        </div>
+        <div id="run-overview" class="overview empty">还没有运行记录。</div>
+        <div id="timeline" class="card-list"></div>
+        <div id="findings" class="card-list"></div>
+        <div id="artifacts" class="artifact-list"></div>
+        <div id="results" class="result-list"></div>
+      </section>
+    </main>
+    <script type="module" src="./app.js"></script>
+  </body>
+  </html>

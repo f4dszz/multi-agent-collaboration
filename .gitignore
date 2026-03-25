@@ -1,0 +1,11 @@
+﻿__pycache__/
+*.py[cod]
+.tmp-tests/
+tmp*/
+frontend/node_modules/
+runtime/logs/
+runtime/orchestrator.db
+runtime/plan-cycle-request.json
+runtime/tmp_system_prompt.txt
+runtime/tmp_user_prompt.txt
+runtime/cli-temp/

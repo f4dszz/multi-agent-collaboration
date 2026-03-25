@@ -1,0 +1,272 @@
+:root {
+  --bg: #f4efe2;
+  --surface: #fffdf7;
+  --surface-alt: #f7f1e4;
+  --border: #d7cdb9;
+  --text: #1f241f;
+  --muted: #625949;
+  --accent: #9b4d29;
+  --accent-soft: #ead5c7;
+  --danger: #8c2f2f;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background:
+    radial-gradient(circle at top left, rgba(155, 77, 41, 0.08), transparent 32%),
+    linear-gradient(180deg, #efe8d7 0%, #fcfaf5 100%);
+  color: var(--text);
+  font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+}
+
+.page {
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 32px 20px 48px;
+}
+
+.hero {
+  display: flex;
+  justify-content: space-between;
+  gap: 24px;
+  align-items: flex-start;
+  margin-bottom: 24px;
+}
+
+.eyebrow {
+  margin: 0 0 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: 12px;
+  color: var(--accent);
+}
+
+h1,
+h2,
+h3 {
+  font-family: "IBM Plex Serif", Georgia, serif;
+}
+
+h1 {
+  font-size: clamp(30px, 5vw, 46px);
+  margin: 0 0 10px;
+}
+
+.lead {
+  max-width: 760px;
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.status-panel,
+.panel {
+  background: rgba(255, 253, 247, 0.92);
+  border: 1px solid var(--border);
+}
+
+.status-panel {
+  min-width: 290px;
+  padding: 16px;
+}
+
+.status-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 8px 0;
+  border-top: 1px solid rgba(215, 205, 185, 0.55);
+}
+
+.status-row:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.panel {
+  padding: 18px;
+  margin-bottom: 20px;
+}
+
+.panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.panel-header h2 {
+  margin: 0;
+  font-size: 24px;
+}
+
+button,
+select,
+input,
+textarea {
+  font: inherit;
+}
+
+button {
+  border: 1px solid #4c2b18;
+  background: #4c2b18;
+  color: #fff9f2;
+  padding: 10px 14px;
+  cursor: pointer;
+}
+
+button:hover {
+  background: #64351d;
+}
+
+.provider-grid,
+.card-list,
+.artifact-list,
+.result-list {
+  display: grid;
+  gap: 14px;
+}
+
+.provider-grid {
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+}
+
+.provider-card,
+.timeline-card,
+.finding-card,
+.artifact-card,
+.result-card,
+.overview {
+  border: 1px solid var(--border);
+  background: var(--surface);
+  padding: 14px;
+}
+
+.provider-card strong,
+.artifact-card strong,
+.result-card strong,
+.timeline-card strong,
+.finding-card strong {
+  display: block;
+  margin-bottom: 8px;
+}
+
+.provider-meta,
+.muted {
+  color: var(--muted);
+}
+
+.tag-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.tag {
+  padding: 3px 8px;
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+  font-size: 12px;
+}
+
+.tag.blocker {
+  border-color: #cf8f8f;
+  color: var(--danger);
+}
+
+.tag.open {
+  background: #f7e4e4;
+}
+
+.tag.addressed {
+  background: #e4f2e7;
+  color: #31563a;
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.form-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.form-grid label span {
+  font-size: 14px;
+  color: var(--muted);
+}
+
+.form-grid input[type="text"],
+.form-grid select,
+.form-grid textarea {
+  width: 100%;
+  padding: 10px;
+  border: 1px solid var(--border);
+  background: #fffdf8;
+}
+
+.wide {
+  grid-column: 1 / -1;
+}
+
+.inline {
+  grid-column: 1 / -1;
+  display: flex !important;
+  flex-direction: row !important;
+  align-items: center;
+}
+
+.actions {
+  grid-column: 1 / -1;
+}
+
+.overview {
+  margin-bottom: 14px;
+}
+
+.overview.empty {
+  color: var(--muted);
+}
+
+.artifact-card pre,
+.result-card pre {
+  max-height: 280px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: #f7f1e4;
+  padding: 10px;
+  border: 1px solid rgba(215, 205, 185, 0.8);
+}
+
+.result-card {
+  border-left: 5px solid var(--accent);
+}
+
+.result-card.error {
+  border-left-color: var(--danger);
+}
+
+@media (max-width: 960px) {
+  .hero {
+    flex-direction: column;
+  }
+
+  .status-panel {
+    width: 100%;
+  }
+
+  .form-grid {
+    grid-template-columns: 1fr;
+  }
+}
