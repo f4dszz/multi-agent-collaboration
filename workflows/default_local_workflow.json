@@ -13,6 +13,7 @@
     "plan_revision",
     "awaiting_plan_approval",
     "implementing",
+    "awaiting_checkpoint_approval",
     "implementation_review",
     "verifying",
     "awaiting_final_approval",
@@ -28,6 +29,11 @@
     {
       "name": "final_gate",
       "state": "awaiting_final_approval",
+      "actor": "human"
+    },
+    {
+      "name": "checkpoint_gate",
+      "state": "awaiting_checkpoint_approval",
       "actor": "human"
     }
   ],

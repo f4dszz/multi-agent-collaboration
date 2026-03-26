@@ -4,6 +4,7 @@ export type RunState =
   | "plan_revision"
   | "awaiting_plan_approval"
   | "implementing"
+  | "awaiting_checkpoint_approval"
   | "implementation_review"
   | "verifying"
   | "awaiting_final_approval"

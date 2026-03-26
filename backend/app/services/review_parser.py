@@ -28,8 +28,9 @@ def parse_review_output(text: str) -> ReviewRecord:
         stripped = line.strip()
         if _is_horizontal_rule(stripped):
             continue
-        normalized = stripped.lower().rstrip(":")
-        if stripped.endswith(":"):
+        normalized_line = _strip_markdown_wrappers(stripped)
+        normalized = normalized_line.lower().rstrip(":")
+        if normalized_line.endswith(":"):
             current_section = normalized if normalized in SECTION_SEVERITY else None
             if current_section:
                 continue
@@ -38,7 +39,7 @@ def parse_review_output(text: str) -> ReviewRecord:
         if not stripped.startswith("-"):
             continue
         severity = SECTION_SEVERITY[current_section]
-        raw = stripped[1:].strip()
+        raw = _strip_markdown_wrappers(stripped[1:].strip())
         if raw.lower() in {"none", "n/a", "na"} or _is_horizontal_rule(raw):
             continue
         counters[severity] += 1
@@ -68,7 +69,8 @@ def parse_review_output(text: str) -> ReviewRecord:
 
 def _parse_decision(lines: list[str]) -> Decision:
     for line in lines:
-        prefix, separator, value = line.partition(":")
+        cleaned = _strip_markdown_wrappers(line.strip())
+        prefix, separator, value = cleaned.partition(":")
         if separator and prefix.strip().lower() == "decision":
             normalized = _strip_markdown_wrappers(value.strip()).lower()
             if normalized in {"approve", "revise", "reject"}:
@@ -77,12 +79,12 @@ def _parse_decision(lines: list[str]) -> Decision:
 
 
 def _parse_risk_tags(lines: list[str]) -> set[str]:
-    pattern = re.compile(r"^Risk-Tags:\s*(.+)\s*$", re.IGNORECASE)
     for line in lines:
-        match = pattern.match(line.strip())
-        if not match:
+        cleaned = _strip_markdown_wrappers(line.strip())
+        prefix, separator, value = cleaned.partition(":")
+        if not separator or prefix.strip().lower() != "risk-tags":
             continue
-        raw = match.group(1).strip()
+        raw = value.strip()
         if raw.lower() in {"none", "n/a", "na"}:
             return set()
         return {
@@ -123,7 +125,7 @@ def _strip_markdown_wrappers(text: str) -> str:
             if cleaned.startswith(wrapper) and cleaned.endswith(wrapper) and len(cleaned) > len(wrapper) * 2:
                 cleaned = cleaned[len(wrapper) : -len(wrapper)].strip()
                 changed = True
-    return cleaned
+    return cleaned.strip("*_` ").strip()
 
 
 def _is_horizontal_rule(text: str) -> bool:

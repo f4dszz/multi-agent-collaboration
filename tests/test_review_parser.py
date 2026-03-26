@@ -57,6 +57,32 @@ Summary:
         self.assertEqual({"security", "architecture"}, record.risk_tags)
         self.assertEqual([], record.findings)
 
+    def test_markdown_wrapped_headings_and_findings_are_parsed(self) -> None:
+        text = """
+I have the full plan content.
+
+---
+
+**Decision: revise**
+**Risk-Tags: scope-drift, architecture**
+
+**Blockers:**
+- **B1 | Scope drift | The plan turns validation into implementation.**
+**Concerns:**
+- **C1 | Testability | Acceptance criteria are subjective.**
+**Suggestions:**
+- **S1 | Tighten criteria | Add measurable bounds.**
+""".strip()
+
+        record = parse_review_output(text)
+
+        self.assertEqual(Decision.REVISE, record.decision)
+        self.assertEqual({"scope-drift", "architecture"}, record.risk_tags)
+        self.assertEqual(3, len(record.findings))
+        self.assertEqual("B1", record.findings[0].key)
+        self.assertEqual(FindingSeverity.BLOCKER, record.findings[0].severity)
+        self.assertEqual("Tighten criteria", record.findings[2].title)
+
 
 if __name__ == "__main__":
     unittest.main()

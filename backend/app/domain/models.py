@@ -17,6 +17,7 @@ class RunState(StrEnum):
     PLAN_REVISION = "plan_revision"
     AWAITING_PLAN_APPROVAL = "awaiting_plan_approval"
     IMPLEMENTING = "implementing"
+    AWAITING_CHECKPOINT_APPROVAL = "awaiting_checkpoint_approval"
     IMPLEMENTATION_REVIEW = "implementation_review"
     VERIFYING = "verifying"
     AWAITING_FINAL_APPROVAL = "awaiting_final_approval"
