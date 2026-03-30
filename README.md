@@ -1,167 +1,175 @@
-# Local Agent Workflow Orchestrator
+# Codex Project - 轻量多Agent邮箱路由系统
 
-一个本地优先的多代理协作编排器参考项目，用来约束 `Codex CLI`、`Claude Code CLI` 这类代理在复杂项目中的协作方式，减少单个长会话 agent 带来的方向漂移。
+本地多Agent协作编排平台。系统只做"人肉中继"做的事：建文件夹、发模版触发词、等agent做完、通知对方、关键节点问用户。
 
-这个仓库当前已经落地到一个可运行的本地控制台原型，重点包括：
+## 快速开始
 
-- 用户提交需求后，`Executor + Reviewer` 先完成计划讨论
-- 计划进入人工审批，用户可以决定哪些步骤需要 checkpoint 审批，或者一次性执行到最终审批
-- 批准后系统按计划步骤推进，并把 timeline、steps、approvals、artifacts、command history 保留下来
-- 运行态采用 `SQLite + 文件产物库`：SQLite 保存结构化真相，Markdown 产物继续给人看
-- 静态前端控制台可以查看 run 列表、计划、步骤、审批和命令记录
+### 前置要求
 
-## 核心结论
+- Python 3.10+
+- Claude Code CLI（已安装并登录）
+- Node.js（Claude Code依赖）
 
-- 主流程采用 `Executor + Reviewer`
-- 第三角色不是常驻“优化人”，而是按条件触发的 `Verifier / Judge`
-- 用户不再翻文档，而是在统一面板中查看时间线、步骤、产物、阻塞项和审批关卡
-- 文档仍然保留，给人审阅；流程真相由 SQLite 维护
-- Markdown 和结构化数据不是二选一，而是双轨：Markdown 给人看，SQLite/结构化字段给系统推进状态
+### 安装
 
-## 目录
+```bash
+# 克隆项目
+git clone <repo-url>
+cd codex_project
 
-```text
-.
-├── README.md
-├── backend
-│   └── app
-│       ├── api
-│       ├── domain
-│       └── services
-├── docs
-│   ├── PRODUCT_ARCHITECTURE.md
-│   ├── SYSTEM_ARCHITECTURE.md
-│   └── TEST_CASES.md
-├── frontend
-│   ├── README.md
-│   └── src
-├── roles
-│   ├── executor.md
-│   ├── reviewer.md
-│   ├── verifier.md
-│   └── human_gate.md
-├── tests
-└── workflows
-    └── default_local_workflow.json
+# 无需安装依赖 — 纯标准库，零第三方包
 ```
 
-## 文档入口
+### 启动
 
-- 产品说明见 [docs/PRODUCT_ARCHITECTURE.md](docs/PRODUCT_ARCHITECTURE.md)
-- 系统设计见 [docs/SYSTEM_ARCHITECTURE.md](docs/SYSTEM_ARCHITECTURE.md)
-- 测试策略与测试用例见 [docs/TEST_CASES.md](docs/TEST_CASES.md)
-
-## 主流程
-
-当前 demo 的主流程是：
-
-1. 用户提交需求，创建一个 run。
-2. `Executor` 起草计划，`Reviewer` 审核计划；若需要，系统自动进行若干轮计划修订。
-3. 计划进入 `awaiting_plan_approval`，用户查看计划并勾选哪些步骤需要 checkpoint 审批。
-4. 用户批准计划后，系统按步骤执行。
-5. 如果某一步被标记为 checkpoint，执行完该步后停在 `awaiting_checkpoint_approval`。
-6. 全部步骤完成后进入 `awaiting_final_approval`。
-7. 用户最终批准后，run 进入 `completed`。
-
-## 运行测试
-
-当前仓库中的测试只依赖 Python 标准库：
-
-```powershell
-python -m unittest discover -s tests -v
+```bash
+cd backend
+python server.py
+# Server running at http://127.0.0.1:8765
 ```
 
-## 运行 Demo
+浏览器打开 http://127.0.0.1:8765 即可使用。
 
-当前仓库里真正可运行的一体化 Demo 是：
+## 使用流程
 
-- 后端 API：`backend/server.py`
-- 静态前端：`frontend/site`
+```
+1. 点击 [+] 创建 Room
+   - 填写 Room ID、Workspace（真实存在的项目路径）
+   - 选择 Executor/Reviewer 的 Provider（claude 或 codex）
 
-推荐直接从仓库根目录启动：
+2. 点击 [Onboard]
+   - 系统给双方agent发送角色手册
+   - 执行人和监督人分别了解自己的职责
+   - 流式输出：可以实时看到agent的思考过程
 
-```powershell
-python -m backend.server
+3. 输入任务
+   - Onboard完成后弹出任务输入框
+   - 输入你想让执行人做的事情，回车发送
+   - 执行人收到任务后开始工作
+
+4. 协作循环
+   - [Next Round]: 手动触发下一轮（executor → reviewer 交替）
+   - [▶ Full-Auto]: 全自动模式，executor ↔ reviewer 持续循环
+   - [⏸ Pause]: 暂停全自动模式
+   - 底部输入框: 直接给指定agent发消息（用户干预）
+
+5. 审批
+   - [Approve]: 确认当前阶段完成
+   - [Reject]: 驳回，要求继续修改
 ```
 
-然后在浏览器打开：
+## 架构
 
-```text
-http://127.0.0.1:8765/
+### 设计原则
+
+```
+系统做的事                系统不做的事
+────────                 ────────
+建文件夹结构              组装上下文
+发模版触发词              解析agent输出
+等agent做完              代agent写邮箱
+通知另一个agent           维护隐式记忆
+关键节点问用户            复杂状态机
+展示对话流
 ```
 
-这会同时提供：
+Agent有自己的持久session和记忆。系统只发一句简单的模版提示词（如"去检查对方的回复，严格分析"），不注入上下文。
 
-- 前端控制台页面
-- `/api/health`
-- `/api/providers`
-- `/api/runs`
-- `/api/runs/{run_id}`
-- `/api/runs/{run_id}/continue`
-- `/api/runs/{run_id}/plan-approval`
-- `/api/runs/{run_id}/checkpoint-approval`
-- `/api/runs/{run_id}/final-approval`
-- `/api/last-run`
-- `/api/reviews/repo`
+### 技术栈
 
-## SQLite 与产物
+- **后端**: Python标准库（http.server + sqlite3 + subprocess + threading）
+- **前端**: 原生HTML/CSS/JS（无框架、无构建）
+- **CLI通信**: Claude Code CLI（`--output-format stream-json --verbose`，流式输出）
+- **持久session**: Claude Code的`--session-id` + `--resume`，agent保持完整记忆
+- **存储**: SQLite（3张表：rooms, sessions, messages）+ 文件系统（邮箱文件）
 
-运行态数据在：
+### 目录结构
 
-- SQLite：`runtime/orchestrator.db`
-- 运行快照：`runtime/runs/*.json`
-- Markdown 产物：`runtime/artifacts/<project>/<run_id>/`
-- 这些都属于本地运行产物，只用于调试与回放，不提交到 Git
-
-SQLite 里目前最重要的表有：
-
-- `workflow_runs`：run 的主状态
-- `run_contexts`：任务、workspace、provider、审批模式、当前步骤索引
-- `execution_steps`：每一步的标题、详情、状态、是否需要审批
-- `approvals`：计划审批、checkpoint 审批、最终审批
-- `timeline_events`：时间线
-- `findings`：review 产出的结构化问题
-- `artifacts`：Markdown 产物索引
-- `command_results`：CLI 调用记录
-
-如果你要直接看表，我现在的查看方式通常是：
-
-```powershell
-@'
-import sqlite3
-conn = sqlite3.connect("runtime/orchestrator.db")
-for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"):
-    print(row[0])
-'@ | python -
+```
+codex_project/
+├── backend/
+│   ├── server.py           # HTTP Server（8个端点）
+│   └── app/
+│       ├── scaffolder.py   # Room文件夹结构创建
+│       ├── templates.py    # 模版加载和渲染
+│       ├── session_mgr.py  # CLI session管理（流式Popen）
+│       ├── router.py       # 消息路由（后台线程 + Full-Auto循环）
+│       └── store.py        # SQLite存储（rooms/sessions/messages）
+├── frontend/
+│   └── site/
+│       ├── index.html      # 单页应用
+│       ├── styles.css      # 深色主题
+│       └── app.js          # Chat UI + 轮询 + Markdown渲染
+├── templates/              # 5个提示词模版
+│   ├── onboarding.txt      # 首次发角色手册
+│   ├── trigger_execute.txt # 让执行人开始工作
+│   ├── trigger_review.txt  # 让监督人审核
+│   ├── trigger_respond.txt # 让执行人回应反馈
+│   └── trigger_recover.txt # Session恢复
+├── docs/                   # 文档
+└── tests/                  # 测试
 ```
 
-或者查询某张表：
+### 邮箱文件结构（每个Room自动生成）
 
-```powershell
-@'
-import sqlite3
-conn = sqlite3.connect("runtime/orchestrator.db")
-conn.row_factory = sqlite3.Row
-for row in conn.execute("SELECT run_id, state FROM workflow_runs ORDER BY run_id DESC LIMIT 20"):
-    print(dict(row))
-'@ | python -
+```
+runtime/rooms/{room_id}/.local_agent_ops/
+├── agent_mailbox/
+│   ├── README.txt                    # 使用说明
+│   ├── {执行人}_给_{监督人}.txt       # 执行人→监督人 固定槽位
+│   ├── {监督人}_给_{执行人}.txt       # 监督人→执行人 固定槽位
+│   ├── 共识状态.txt                  # 双方共识
+│   ├── 待决问题.txt                  # 问题追踪
+│   └── 轮次记录.txt                  # 轮次历史
+├── onboarding/                       # 角色手册
+└── recovery/                         # Session恢复文档
 ```
 
-如果要可视化，最直接的是：
+### API端点
 
-- `DB Browser for SQLite`
-- VS Code 的 SQLite 扩展
-- JetBrains/DataGrip 这类数据库工具
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/health` | 健康检查 |
+| GET | `/api/rooms` | 列出所有Room |
+| POST | `/api/rooms` | 创建Room（脚手架 + onboarding） |
+| GET | `/api/rooms/{id}` | Room详情 + 消息流 + 邮箱文件 |
+| POST | `/api/rooms/{id}/next` | 触发下一轮（onboard/auto/executor/reviewer） |
+| POST | `/api/rooms/{id}/task` | 下发任务给执行人 |
+| POST | `/api/rooms/{id}/auto` | 开启/停止Full-Auto模式 |
+| POST | `/api/rooms/{id}/approve` | 审批/驳回/用户干预 |
 
-是否要把 SQLite 直接暴露给最终用户看，要看场景。对普通使用者，前端控制台里的 run/steps/approvals/timeline 已经更合适；数据库更偏开发者排障视角。
+### 前端界面
 
-## 当前实现边界
+```
+┌──────────┬──────────────────────────────┬─────────────┐
+│ Room列表  │       聊天消息流               │  邮箱文件    │
+│          │                              │  查看器      │
+│ [Room 1] │  系统: 已完成onboarding       │             │
+│ [Room 2] │  执行人: [流式输出思考过程]     │  执行人邮箱  │
+│          │  监督人: [审核结果]            │  监督人邮箱  │
+│          │  系统: 等待用户操作            │  共识状态    │
+│          │                              │  待决问题    │
+│          │ [Onboard] [Next] [Auto] ...  │  轮次记录    │
+│          │ [任务输入框 / 直接干预输入框]   │             │
+└──────────┴──────────────────────────────┴─────────────┘
+```
 
-当前版本已经不是纯文档骨架，但也还不是最终产品。当前边界主要有：
+特性：
+- 消息支持Markdown渲染（标题、加粗、代码块、列表）
+- 流式输出：agent思考过程实时展示，带打字光标动画
+- 邮箱文件展开/折叠状态记忆（轮询刷新不丢失）
+- Full-Auto模式：executor ↔ reviewer自动循环，Pause一键暂停
 
-1. 执行推进仍然是同步 HTTP 调用，不是后台 job queue。
-2. 当前前端是静态站点，没有 WebSocket 推送。
-3. Reviewer 对执行步骤的反馈目前会把 run 阻塞下来，还没有更细的“自动返工若干轮”策略。
-4. `frontend/src` 仍然只是 React 草图；真实交付前端是 `frontend/site`。
+## 状态流转
 
-下一阶段更应该做的是任务后台化、实时推送、diff 聚合，以及更细的 checkpoint/审批策略，而不是再扩展一堆自由聊天式 agent。
+```
+onboarding → awaiting_task → working ⇄ awaiting_approval → completed
+                                ↑              │
+                                └──────────────┘ (用户驳回)
+```
+
+- **onboarding**: 给双方agent发角色手册
+- **awaiting_task**: 等用户输入第一个任务
+- **working**: executor/reviewer轮流工作中
+- **awaiting_approval**: 等用户审批
+- **completed**: 全部完成

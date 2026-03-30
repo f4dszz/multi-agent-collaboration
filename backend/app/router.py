@@ -1,0 +1,365 @@
+"""Router - 消息路由，系统的核心。
+
+职责极简：发模版给agent → 等完成 → 记录消息 → 切换角色。
+不解析agent输出，不做语义分析，不代agent写邮箱。
+
+所有CLI调用都在后台线程执行，HTTP请求立即返回。
+前端通过轮询看到新消息。
+"""
+
+from __future__ import annotations
+
+import threading
+import traceback
+from pathlib import Path
+from typing import Literal
+
+from . import templates
+from .scaffolder import create_room
+from .session_mgr import SessionManager, Provider
+from .store import Store
+
+
+Turn = Literal["executor", "reviewer"]
+
+
+class Router:
+    """消息路由器。"""
+
+    def __init__(self, store: Store, session_mgr: SessionManager, runtime_root: Path) -> None:
+        self.store = store
+        self.session_mgr = session_mgr
+        self.runtime_root = runtime_root
+        self._busy: dict[str, bool] = {}
+        self._auto_mode: dict[str, bool] = {}  # room_id → auto mode on/off
+
+    def is_busy(self, room_id: str) -> bool:
+        return self._busy.get(room_id, False)
+
+    def _ensure_session(self, session_row: dict, workspace: str) -> None:
+        """确保DB里的session在SessionManager内存中存在（处理server重启）。"""
+        self.session_mgr.restore_session(
+            session_id=session_row["session_id"],
+            role=session_row["role"],
+            provider=session_row["provider"],
+            cli_session_id=session_row["cli_session_id"],
+            workspace=workspace,
+        )
+
+    def _run_in_background(self, room_id: str, fn, *args) -> None:
+        """在后台线程运行fn，完成后清除busy状态。"""
+        def wrapper():
+            try:
+                fn(*args)
+            except Exception as exc:
+                traceback.print_exc()
+                self.store.add_message(room_id, "system", f"[Error] {exc}")
+            finally:
+                self._busy[room_id] = False
+        self._busy[room_id] = True
+        t = threading.Thread(target=wrapper, daemon=True)
+        t.start()
+
+    def _make_stream_callback(self, room_id: str, sender: str):
+        """创建流式回调：先建占位消息，后续chunk就地更新。"""
+        msg_id = self.store.add_message(room_id, sender, "[Thinking...]")
+        chunks: list[str] = []
+
+        def on_chunk(event_type: str, content: str):
+            chunks.append(content)
+            # 每次chunk到达，将所有已收到的内容拼接后更新消息
+            self.store.update_message(msg_id, "\n".join(chunks))
+
+        return msg_id, chunks, on_chunk
+
+    def create_room(
+        self,
+        room_id: str,
+        workspace: str,
+        task: str = "",
+        executor_role: str = "执行人",
+        reviewer_role: str = "监督人",
+        executor_provider: Provider = "claude",
+        reviewer_provider: Provider = "claude",
+    ) -> dict:
+        """创建room：脚手架 + 数据库 + 双方session。"""
+        room_dir = create_room(
+            self.runtime_root, room_id, workspace,
+            executor_role, reviewer_role,
+        )
+
+        room = self.store.create_room(
+            room_id, workspace, executor_role, reviewer_role, task,
+        )
+
+        exec_session = self.session_mgr.create_session(
+            role="executor", provider=executor_provider, workspace=workspace,
+        )
+        review_session = self.session_mgr.create_session(
+            role="reviewer", provider=reviewer_provider, workspace=workspace,
+        )
+
+        self.store.add_session(
+            exec_session.session_id, room_id, "executor",
+            executor_provider, exec_session.cli_session_id,
+        )
+        self.store.add_session(
+            review_session.session_id, room_id, "reviewer",
+            reviewer_provider, review_session.cli_session_id,
+        )
+
+        self.store.add_message(room_id, "system", f"Room created. Task: {task}")
+        return self._room_snapshot(room_id)
+
+    def onboard(self, room_id: str) -> dict:
+        """Onboarding：后台线程给双方agent发角色手册。立即返回。"""
+        room = self.store.get_room(room_id)
+        if not room:
+            raise ValueError(f"Room not found: {room_id}")
+        if self.is_busy(room_id):
+            return self._room_snapshot(room_id)
+
+        self.store.add_message(room_id, "system", "Starting onboarding...")
+        self._run_in_background(room_id, self._do_onboard, room_id)
+        return self._room_snapshot(room_id)
+
+    def _do_onboard(self, room_id: str) -> None:
+        """实际执行onboarding（在后台线程中运行）。"""
+        room = self.store.get_room(room_id)
+        room_dir = self.runtime_root / "rooms" / room_id
+        executor_role = room["executor_role"]
+        reviewer_role = room["reviewer_role"]
+
+        sessions = self.store.get_sessions_for_room(room_id)
+        exec_session_row = next(s for s in sessions if s["role"] == "executor")
+        review_session_row = next(s for s in sessions if s["role"] == "reviewer")
+        self._ensure_session(exec_session_row, room["workspace"])
+        self._ensure_session(review_session_row, room["workspace"])
+
+        # Onboard executor
+        self.store.add_message(room_id, "system", f"[Onboarding {executor_role}...]")
+        exec_ctx = templates.get_room_context(
+            room_dir, executor_role, reviewer_role, room["workspace"],
+        )
+        exec_msg = templates.render("onboarding", **exec_ctx)
+        msg_id, chunks, on_chunk = self._make_stream_callback(room_id, "executor")
+        exec_result = self.session_mgr.send_message(
+            exec_session_row["session_id"], exec_msg, on_chunk=on_chunk,
+        )
+        # Replace streaming placeholder with final result
+        self.store.update_message(msg_id, exec_result.output_text or "\n".join(chunks) or "[No response]")
+
+        # Onboard reviewer
+        self.store.add_message(room_id, "system", f"[Onboarding {reviewer_role}...]")
+        review_ctx = templates.get_room_context(
+            room_dir, reviewer_role, executor_role, room["workspace"],
+        )
+        review_msg = templates.render("onboarding", **review_ctx)
+        msg_id2, chunks2, on_chunk2 = self._make_stream_callback(room_id, "reviewer")
+        review_result = self.session_mgr.send_message(
+            review_session_row["session_id"], review_msg, on_chunk=on_chunk2,
+        )
+        self.store.update_message(msg_id2, review_result.output_text or "\n".join(chunks2) or "[No response]")
+
+        self.store.update_room_state(room_id, "awaiting_task")
+        self.store.add_message(room_id, "system", "Onboarding complete. Please assign a task.")
+
+    def run_round(self, room_id: str, turn: Turn) -> dict:
+        """执行一轮：后台线程发模版给指定角色。立即返回。"""
+        room = self.store.get_room(room_id)
+        if not room:
+            raise ValueError(f"Room not found: {room_id}")
+        if self.is_busy(room_id):
+            return self._room_snapshot(room_id)
+
+        self._run_in_background(room_id, self._do_round, room_id, turn)
+        return self._room_snapshot(room_id)
+
+    def _do_round(self, room_id: str, turn: Turn) -> None:
+        """实际执行一轮（在后台线程中运行）。"""
+        room = self.store.get_room(room_id)
+        room_dir = self.runtime_root / "rooms" / room_id
+        executor_role = room["executor_role"]
+        reviewer_role = room["reviewer_role"]
+
+        sessions = self.store.get_sessions_for_room(room_id)
+        session_row = next(s for s in sessions if s["role"] == turn)
+        self._ensure_session(session_row, room["workspace"])
+
+        if turn == "executor":
+            role, other_role = executor_role, reviewer_role
+            last_msg = self.store.get_latest_message(room_id)
+            template_name = "trigger_execute"
+            if last_msg and last_msg["sender"] == "reviewer":
+                template_name = "trigger_respond"
+        else:
+            role, other_role = reviewer_role, executor_role
+            template_name = "trigger_review"
+
+        ctx = templates.get_room_context(room_dir, role, other_role, room["workspace"])
+        message = templates.render(template_name, **ctx)
+
+        self.store.add_message(room_id, "system", f"[Triggering {role}...]")
+        msg_id, chunks, on_chunk = self._make_stream_callback(room_id, turn)
+        result = self.session_mgr.send_message(
+            session_row["session_id"], message, on_chunk=on_chunk,
+        )
+        self.store.update_message(msg_id, result.output_text or "\n".join(chunks) or "[No response]")
+
+    def approve(self, room_id: str, comment: str = "") -> dict:
+        """用户审批：确认进入下一阶段。"""
+        room = self.store.get_room(room_id)
+        if not room:
+            raise ValueError(f"Room not found: {room_id}")
+
+        msg = f"[Approved] {comment}" if comment else "[Approved]"
+        self.store.add_message(room_id, "user", msg)
+
+        if room["state"] == "awaiting_approval":
+            self.store.update_room_state(room_id, "completed")
+            self.store.add_message(room_id, "system", "Run completed.")
+        else:
+            self.store.add_message(room_id, "system", "Approval noted. Continuing.")
+
+        return self._room_snapshot(room_id)
+
+    def reject(self, room_id: str, comment: str = "") -> dict:
+        """用户驳回：要求继续修改。"""
+        room = self.store.get_room(room_id)
+        if not room:
+            raise ValueError(f"Room not found: {room_id}")
+
+        msg = f"[Rejected] {comment}" if comment else "[Rejected]"
+        self.store.add_message(room_id, "user", msg)
+        self.store.update_room_state(room_id, "working")
+        self.store.add_message(room_id, "system", "Rejection noted. Back to working.")
+
+        return self._room_snapshot(room_id)
+
+    def user_message(self, room_id: str, message: str, target: Turn | None = None) -> dict:
+        """用户直接干预：发消息给特定agent或广播。"""
+        room = self.store.get_room(room_id)
+        if not room:
+            raise ValueError(f"Room not found: {room_id}")
+
+        self.store.add_message(room_id, "user", message)
+
+        if target:
+            if self.is_busy(room_id):
+                self.store.add_message(room_id, "system", "[Agent is busy, message queued]")
+            else:
+                self._run_in_background(room_id, self._do_intervene, room_id, target, message)
+
+        return self._room_snapshot(room_id)
+
+    def assign_task(self, room_id: str, task: str) -> dict:
+        """用户下发任务给执行人（onboard后的第一步）。"""
+        room = self.store.get_room(room_id)
+        if not room:
+            raise ValueError(f"Room not found: {room_id}")
+        if self.is_busy(room_id):
+            return self._room_snapshot(room_id)
+
+        self.store.add_message(room_id, "user", task)
+        self.store.update_room_state(room_id, "working")
+
+        # 发给executor：用户的任务 + trigger_execute模版
+        self._run_in_background(room_id, self._do_assign_task, room_id, task)
+        return self._room_snapshot(room_id)
+
+    def _do_assign_task(self, room_id: str, task: str) -> None:
+        """后台执行：将任务发给执行人。"""
+        room = self.store.get_room(room_id)
+        room_dir = self.runtime_root / "rooms" / room_id
+        executor_role = room["executor_role"]
+        reviewer_role = room["reviewer_role"]
+
+        sessions = self.store.get_sessions_for_room(room_id)
+        session_row = next(s for s in sessions if s["role"] == "executor")
+        self._ensure_session(session_row, room["workspace"])
+
+        ctx = templates.get_room_context(room_dir, executor_role, reviewer_role, room["workspace"])
+        trigger = templates.render("trigger_execute", **ctx)
+        message = f"用户下发了以下任务：\n\n{task}\n\n{trigger}"
+
+        self.store.add_message(room_id, "system", f"[Assigning task to {executor_role}...]")
+        msg_id, chunks, on_chunk = self._make_stream_callback(room_id, "executor")
+        result = self.session_mgr.send_message(
+            session_row["session_id"], message, on_chunk=on_chunk,
+        )
+        self.store.update_message(msg_id, result.output_text or "\n".join(chunks) or "[No response]")
+
+        # 如果是auto mode，继续触发reviewer
+        if self._auto_mode.get(room_id, False):
+            self._do_round(room_id, "reviewer")
+            self._auto_loop(room_id)
+
+    def start_auto(self, room_id: str) -> dict:
+        """开启Full-Auto模式。"""
+        room = self.store.get_room(room_id)
+        if not room:
+            raise ValueError(f"Room not found: {room_id}")
+
+        self._auto_mode[room_id] = True
+        self.store.add_message(room_id, "system", "[Full-Auto mode ON — click Pause to stop]")
+
+        if not self.is_busy(room_id):
+            self._run_in_background(room_id, self._auto_loop, room_id)
+
+        return self._room_snapshot(room_id)
+
+    def stop_auto(self, room_id: str) -> dict:
+        """停止Full-Auto模式。"""
+        self._auto_mode[room_id] = False
+        self.store.add_message(room_id, "system", "[Full-Auto mode OFF — paused]")
+        return self._room_snapshot(room_id)
+
+    def _auto_loop(self, room_id: str) -> None:
+        """全自动循环：executor → reviewer → executor → ... 直到用户暂停。"""
+        while self._auto_mode.get(room_id, False):
+            # 判断轮到谁
+            last = self.store.get_latest_message(room_id)
+            if not last or last["sender"] in ("system", "user", "reviewer"):
+                turn = "executor"
+            else:
+                turn = "reviewer"
+
+            self._do_round(room_id, turn)
+
+            if not self._auto_mode.get(room_id, False):
+                break
+
+    def _do_intervene(self, room_id: str, target: Turn, message: str) -> None:
+        """用户干预的后台执行。"""
+        room = self.store.get_room(room_id)
+        sessions = self.store.get_sessions_for_room(room_id)
+        session_row = next(s for s in sessions if s["role"] == target)
+        self._ensure_session(session_row, room["workspace"])
+        prefixed = f"[用户直接指令] 以下是用户对你的直接消息，请认真对待并回复：\n\n{message}"
+        msg_id, chunks, on_chunk = self._make_stream_callback(room_id, target)
+        result = self.session_mgr.send_message(
+            session_row["session_id"], prefixed, on_chunk=on_chunk,
+        )
+        self.store.update_message(msg_id, result.output_text or "\n".join(chunks) or "[No response]")
+
+    def _room_snapshot(self, room_id: str) -> dict:
+        """构建room当前状态的快照。"""
+        room = self.store.get_room(room_id)
+        messages = self.store.get_messages(room_id)
+        sessions = self.store.get_sessions_for_room(room_id)
+
+        mailbox_files = {}
+        room_dir = self.runtime_root / "rooms" / room_id
+        mailbox_dir = room_dir / ".local_agent_ops" / "agent_mailbox"
+        if mailbox_dir.exists():
+            for f in mailbox_dir.glob("*.txt"):
+                mailbox_files[f.name] = f.read_text(encoding="utf-8")
+
+        return {
+            "room": room,
+            "messages": messages,
+            "sessions": sessions,
+            "mailbox_files": mailbox_files,
+            "busy": self.is_busy(room_id),
+            "auto_mode": self._auto_mode.get(room_id, False),
+        }

@@ -1,0 +1,8 @@
+请阅读 {onboarding_file} 了解你的职责和工作方式。
+项目工作区: {workspace}
+邮箱目录: {mailbox_dir}
+你的发件箱: {outbox_file}
+你的收件箱: {inbox_file}
+共识文件: {consensus_file}
+待决问题文件: {issues_file}
+轮次记录文件: {rounds_file}

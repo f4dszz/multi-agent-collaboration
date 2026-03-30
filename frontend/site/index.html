@@ -1,145 +1,82 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="zh-CN">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Local Agent Workflow Orchestrator</title>
-    <link rel="stylesheet" href="./styles.css" />
-  </head>
-  <body>
-    <main class="app-shell">
-      <aside class="sidebar">
-        <section class="panel">
-          <p class="eyebrow">Local Agent Workflow Orchestrator</p>
-          <h1>本地多 Agent 协作控制台</h1>
-          <p class="lead">
-            用户先批计划，再决定哪些节点需要审批；系统按步骤执行，并把计划、节点、审批和产物都保留下来。
-          </p>
-          <div class="status-stack">
-            <div class="status-row">
-              <span>Backend</span>
-              <strong id="backend-status">checking</strong>
-            </div>
-            <div class="status-row">
-              <span>Workspace</span>
-              <strong id="workspace-label">-</strong>
-            </div>
-          </div>
-        </section>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Codex - Multi-Agent Orchestrator</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="app">
+    <!-- Left: Room List -->
+    <aside id="sidebar">
+      <div class="sidebar-header">
+        <h2>Rooms</h2>
+        <button id="btn-new-room" title="Create Room">+</button>
+      </div>
+      <div id="room-list"></div>
+    </aside>
 
-        <section class="panel">
-          <div class="panel-header">
-            <h2>创建 Run</h2>
-          </div>
-          <form id="run-form" class="form-grid">
-            <label class="wide">
-              <span>Workspace</span>
-              <input id="workspace" name="workspace" type="text" />
-            </label>
-            <label>
-              <span>Executor</span>
-              <select id="executor-provider" name="executor_provider"></select>
-            </label>
-            <label>
-              <span>Reviewer</span>
-              <select id="reviewer-provider" name="reviewer_provider"></select>
-            </label>
-            <label>
-              <span>Verifier</span>
-              <select id="verifier-provider" name="verifier_provider"></select>
-            </label>
-            <label>
-              <span>自动计划轮数</span>
-              <input id="max-plan-rounds" name="max_plan_rounds" type="number" min="0" max="5" value="2" />
-            </label>
-            <label class="wide">
-              <span>用户需求</span>
-              <textarea id="task" name="task" rows="8"></textarea>
-            </label>
-            <div class="actions wide">
-              <button id="create-run-button" type="submit">开始计划讨论</button>
-            </div>
-          </form>
-        </section>
-
-        <section class="panel">
-          <div class="panel-header">
-            <h2>Providers</h2>
-            <button id="refresh-providers" type="button">刷新</button>
-          </div>
-          <div id="providers" class="stack"></div>
-        </section>
-
-        <section class="panel">
-          <div class="panel-header">
-            <h2>Runs</h2>
-            <button id="refresh-runs" type="button">刷新</button>
-          </div>
-          <div id="runs" class="stack"></div>
-        </section>
-      </aside>
-
-      <section class="main-content">
-        <section class="panel">
-          <div class="panel-header">
-            <h2>当前 Run</h2>
-            <div class="inline-actions">
-              <button id="continue-button" type="button">继续执行</button>
-            </div>
-          </div>
-          <div id="run-overview" class="overview empty">还没有选择 run。</div>
-          <div id="action-console" class="action-console empty">等待创建或选择一个 run。</div>
-        </section>
-
-        <section class="grid-two">
-          <section class="panel">
-            <div class="panel-header">
-              <h2>执行步骤</h2>
-            </div>
-            <div id="steps" class="stack"></div>
-          </section>
-
-          <section class="panel">
-            <div class="panel-header">
-              <h2>审批记录</h2>
-            </div>
-            <div id="approvals" class="stack"></div>
-          </section>
-        </section>
-
-        <section class="grid-two">
-          <section class="panel">
-            <div class="panel-header">
-              <h2>Timeline</h2>
-            </div>
-            <div id="timeline" class="stack"></div>
-          </section>
-
-          <section class="panel">
-            <div class="panel-header">
-              <h2>Findings</h2>
-            </div>
-            <div id="findings" class="stack"></div>
-          </section>
-        </section>
-
-        <section class="grid-two">
-          <section class="panel">
-            <div class="panel-header">
-              <h2>Artifacts</h2>
-            </div>
-            <div id="artifacts" class="stack"></div>
-          </section>
-
-          <section class="panel">
-            <div class="panel-header">
-              <h2>命令记录</h2>
-            </div>
-            <div id="results" class="stack"></div>
-          </section>
-        </section>
-      </section>
+    <!-- Center: Chat Stream -->
+    <main id="chat-panel">
+      <div id="chat-header">
+        <span id="room-title">Select a room</span>
+        <span id="room-state" class="badge"></span>
+      </div>
+      <div id="chat-messages"></div>
+      <div id="chat-actions">
+        <div id="action-buttons">
+          <button id="btn-onboard" class="action-btn" onclick="doNext('onboard')">Onboard</button>
+          <button id="btn-next" class="action-btn primary" onclick="doNext('auto')">Next Round</button>
+          <button id="btn-auto" class="action-btn auto" onclick="toggleAuto()">Full-Auto</button>
+          <button id="btn-approve" class="action-btn approve" onclick="doApprove('approve')">Approve</button>
+          <button id="btn-reject" class="action-btn reject" onclick="doApprove('reject')">Reject</button>
+        </div>
+        <div id="busy-indicator" style="display:none;font-size:12px;color:var(--accent);margin-bottom:8px"></div>
+        <div id="task-bar" style="display:none">
+          <input id="task-input" placeholder="Describe the task for executor..." />
+          <button onclick="submitTask()">Assign Task</button>
+        </div>
+        <div id="intervene-bar">
+          <input id="intervene-input" placeholder="Direct message to agent..." />
+          <select id="intervene-target">
+            <option value="executor">Executor</option>
+            <option value="reviewer">Reviewer</option>
+          </select>
+          <button onclick="doIntervene()">Send</button>
+        </div>
+      </div>
     </main>
-    <script type="module" src="./app.js"></script>
-  </body>
-  </html>
+
+    <!-- Right: Mailbox Viewer -->
+    <aside id="mailbox-panel">
+      <h3>Mailbox Files</h3>
+      <div id="mailbox-files"></div>
+    </aside>
+  </div>
+
+  <!-- Create Room Dialog -->
+  <dialog id="create-dialog">
+    <h3>Create Room</h3>
+    <form id="create-form">
+      <label>Room ID<input name="room_id" required placeholder="my-project-v1"></label>
+      <label>Workspace<input name="workspace" required placeholder="D:/workSpace/my-project"></label>
+      <label>Task (optional)<textarea name="task" rows="2" placeholder="Initial task description"></textarea></label>
+      <label>Executor Role<input name="executor_role" value="执行人"></label>
+      <label>Reviewer Role<input name="reviewer_role" value="监督人"></label>
+      <label>Executor Provider
+        <select name="executor_provider"><option value="claude">Claude</option><option value="codex">Codex</option></select>
+      </label>
+      <label>Reviewer Provider
+        <select name="reviewer_provider"><option value="claude">Claude</option><option value="codex">Codex</option></select>
+      </label>
+      <div class="dialog-actions">
+        <button type="button" onclick="this.closest('dialog').close()">Cancel</button>
+        <button type="submit" class="primary">Create</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="app.js"></script>
+</body>
+</html>

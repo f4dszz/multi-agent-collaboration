@@ -1,489 +1,410 @@
-const API_ROOT = window.location.protocol === "file:" ? "http://127.0.0.1:8765" : window.location.origin;
+// Codex - Multi-Agent Orchestrator Frontend
+// Chat-style UI: room list | message stream | mailbox viewer
 
-const backendStatus = document.getElementById("backend-status");
-const workspaceLabel = document.getElementById("workspace-label");
-const providersNode = document.getElementById("providers");
-const runsNode = document.getElementById("runs");
-const runOverviewNode = document.getElementById("run-overview");
-const actionConsoleNode = document.getElementById("action-console");
-const stepsNode = document.getElementById("steps");
-const approvalsNode = document.getElementById("approvals");
-const timelineNode = document.getElementById("timeline");
-const findingsNode = document.getElementById("findings");
-const artifactsNode = document.getElementById("artifacts");
-const resultsNode = document.getElementById("results");
-const workspaceInput = document.getElementById("workspace");
-const taskInput = document.getElementById("task");
-const runForm = document.getElementById("run-form");
-const refreshProvidersButton = document.getElementById("refresh-providers");
-const refreshRunsButton = document.getElementById("refresh-runs");
-const continueButton = document.getElementById("continue-button");
-
-const executorSelect = document.getElementById("executor-provider");
-const reviewerSelect = document.getElementById("reviewer-provider");
-const verifierSelect = document.getElementById("verifier-provider");
-
+const API = "";
 const state = {
-  selectedRunId: null,
-  currentRun: null,
-  providers: [],
-  runs: [],
+  selectedRoomId: null,
+  rooms: [],
+  polling: null,
+  msgCount: 0,
+  lastMsgContent: "",    // track last message content for streaming updates
+  expandedMsgs: new Set(),
+  mailboxState: {},
 };
 
-async function main() {
-  await Promise.allSettled([loadHealth(), loadProviders(), loadRuns()]);
-  bindEvents();
-  if (!taskInput.value) {
-    taskInput.value =
-      "实现一个用户可审批的多 agent 协作流程：先讨论计划，再给用户审批，之后按步骤执行并在关键节点暂停。";
-  }
+// --- API helpers ---
+
+async function api(method, path, body) {
+  const opts = {
+    method,
+    headers: { "Content-Type": "application/json" },
+  };
+  if (body) opts.body = JSON.stringify(body);
+  const res = await fetch(`${API}${path}`, opts);
+  const data = await res.json();
+  if (data.error) throw new Error(data.error);
+  return data;
 }
 
-function bindEvents() {
-  refreshProvidersButton.addEventListener("click", loadProviders);
-  refreshRunsButton.addEventListener("click", loadRuns);
-  continueButton.addEventListener("click", continueSelectedRun);
-  runForm.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    await createRun();
+// --- Init ---
+
+async function init() {
+  document.getElementById("btn-new-room").onclick = () =>
+    document.getElementById("create-dialog").showModal();
+
+  document.getElementById("create-form").onsubmit = async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const data = Object.fromEntries(fd.entries());
+    try {
+      await api("POST", "/api/rooms", data);
+      document.getElementById("create-dialog").close();
+      e.target.reset();
+      await loadRooms();
+      selectRoom(data.room_id);
+    } catch (err) {
+      showError(err.message);
+    }
+  };
+
+  await loadRooms();
+  state.polling = setInterval(() => {
+    if (state.selectedRoomId) loadRoom(state.selectedRoomId, true);
+  }, 3000);
+
+  // Enter key support for task and intervene inputs
+  document.getElementById("task-input").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); submitTask(); }
   });
-  runsNode.addEventListener("click", async (event) => {
-    const button = event.target.closest("[data-run-id]");
-    if (!button) {
-      return;
-    }
-    await selectRun(button.dataset.runId);
-  });
-  actionConsoleNode.addEventListener("click", async (event) => {
-    const action = event.target.closest("[data-action]");
-    if (!action || !state.currentRun) {
-      return;
-    }
-    const { run_id: runId } = state.currentRun;
-    if (action.dataset.action === "approve-plan") {
-      await submitPlanApproval(runId, true);
-    }
-    if (action.dataset.action === "reject-plan") {
-      await submitPlanApproval(runId, false);
-    }
-    if (action.dataset.action === "approve-checkpoint") {
-      await submitCheckpointApproval(runId, true);
-    }
-    if (action.dataset.action === "reject-checkpoint") {
-      await submitCheckpointApproval(runId, false);
-    }
-    if (action.dataset.action === "approve-final") {
-      await submitFinalApproval(runId, true);
-    }
-    if (action.dataset.action === "reject-final") {
-      await submitFinalApproval(runId, false);
-    }
+  document.getElementById("intervene-input").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); doIntervene(); }
   });
 }
 
-async function loadHealth() {
+// --- Rooms ---
+
+async function loadRooms() {
   try {
-    const response = await fetch(`${API_ROOT}/api/health`);
-    const data = await response.json();
-    backendStatus.textContent = data.status;
-    workspaceLabel.textContent = data.default_workspace;
-    workspaceInput.value = data.default_workspace;
-  } catch (error) {
-    backendStatus.textContent = "offline";
-    workspaceLabel.textContent = "backend unavailable";
+    state.rooms = await api("GET", "/api/rooms");
+  } catch {
+    state.rooms = [];
+  }
+  renderRoomList();
+}
+
+function renderRoomList() {
+  const el = document.getElementById("room-list");
+  if (!state.rooms.length) {
+    el.innerHTML = '<div style="padding:12px;color:var(--text-dim);font-size:12px">No rooms yet. Click + to create one.</div>';
+    return;
+  }
+  el.innerHTML = state.rooms
+    .map(
+      (r) => `
+    <div class="room-item ${r.room_id === state.selectedRoomId ? "active" : ""}"
+         onclick="selectRoom('${r.room_id}')">
+      <div class="room-name">${esc(r.room_id)}</div>
+      <div class="room-meta">${esc(r.state)} &middot; ${esc(r.task || "no task")}</div>
+    </div>`
+    )
+    .join("");
+}
+
+async function selectRoom(roomId) {
+  state.selectedRoomId = roomId;
+  state.msgCount = 0;
+  state.expandedMsgs.clear();
+  state.mailboxState = {};
+  renderRoomList();
+  await loadRoom(roomId);
+}
+
+// --- Room detail ---
+
+async function loadRoom(roomId, silent) {
+  try {
+    const data = await api("GET", `/api/rooms/${roomId}`);
+    renderRoom(data, silent);
+  } catch (err) {
+    if (!silent) showError(err.message);
   }
 }
 
-async function loadProviders() {
-  try {
-    const response = await fetch(`${API_ROOT}/api/providers`);
-    const data = await response.json();
-    state.providers = data.providers || [];
-    renderProviders();
-  } catch (error) {
-    state.providers = [];
-    renderProviders();
-  }
-}
+function renderRoom(data, silent) {
+  const room = data.room;
+  const messages = data.messages || [];
+  const busy = data.busy || false;
 
-async function loadRuns() {
-  try {
-    const response = await fetch(`${API_ROOT}/api/runs`);
-    const data = await response.json();
-    state.runs = data.runs || [];
-    renderRuns();
-    if (!state.selectedRunId && state.runs[0]) {
-      await selectRun(state.runs[0].run_id);
+  document.getElementById("room-title").textContent =
+    `${room.room_id} — ${room.task || ""}`;
+  const badge = document.getElementById("room-state");
+  badge.textContent = busy ? `${room.state} (working...)` : room.state;
+
+  // Detect if messages changed (new message or streaming content update)
+  const lastMsg = messages.length > 0 ? messages[messages.length - 1] : null;
+  const lastContent = lastMsg ? lastMsg.content : "";
+  const countChanged = messages.length !== state.msgCount;
+  const contentChanged = lastContent !== state.lastMsgContent;
+
+  if (countChanged || contentChanged) {
+    const el = document.getElementById("chat-messages");
+    const wasAtBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+
+    if (countChanged) {
+      // Full re-render when new messages arrive
+      el.innerHTML = messages.map((m, i) => renderMessage(m, i, busy && i === messages.length - 1)).join("");
+    } else if (contentChanged && messages.length > 0) {
+      // Only update the last message (streaming update)
+      const lastEl = el.querySelector(".message:last-child");
+      if (lastEl) {
+        const bodyEl = lastEl.querySelector(".msg-body");
+        if (bodyEl) {
+          bodyEl.innerHTML = md(lastContent);
+          bodyEl.classList.remove("collapsed");
+        }
+      }
     }
-  } catch (error) {
-    state.runs = [];
-    renderRuns();
+
+    if (wasAtBottom || !silent) {
+      el.scrollTop = el.scrollHeight;
+    }
+    state.msgCount = messages.length;
+    state.lastMsgContent = lastContent;
+  }
+
+  // Mailbox: update content but preserve open/closed state
+  renderMailbox(data.mailbox_files || {});
+
+  updateActions(room.state, busy, data.auto_mode || false);
+
+  const indicator = document.getElementById("busy-indicator");
+  if (busy) {
+    indicator.innerHTML = '<span class="loading"></span> Agent is working...';
+    indicator.style.display = "block";
+  } else {
+    indicator.style.display = "none";
   }
 }
 
-async function selectRun(runId) {
-  const response = await fetch(`${API_ROOT}/api/runs/${runId}`);
-  const data = await response.json();
-  state.selectedRunId = runId;
-  state.currentRun = data.run;
-  renderRuns();
-  renderCurrentRun();
-}
+function renderMessage(m, index, isStreaming) {
+  const sender = m.sender;
+  const time = m.created_at ? new Date(m.created_at).toLocaleTimeString() : "";
+  const raw = m.content || "";
+  const html = md(raw);
+  const isLong = raw.length > 500;
+  const isExpanded = state.expandedMsgs.has(index);
 
-async function createRun() {
-  const payload = {
-    workspace: workspaceInput.value,
-    executor_provider: executorSelect.value,
-    reviewer_provider: reviewerSelect.value,
-    verifier_provider: verifierSelect.value || null,
-    task: taskInput.value,
-    max_plan_rounds: Number(document.getElementById("max-plan-rounds").value || 2),
+  const labels = {
+    executor: "EXECUTOR",
+    reviewer: "REVIEWER",
+    user: "USER",
+    system: "SYSTEM",
   };
-  setOverviewMessage("计划讨论中...");
-  const response = await fetch(`${API_ROOT}/api/runs`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+
+  return `
+    <div class="message ${sender} ${isStreaming ? "streaming" : ""}">
+      <div class="msg-header">${labels[sender] || sender}${isStreaming ? ' <span class="typing-dot"></span>' : ""}</div>
+      <div class="msg-body ${isLong && !isExpanded ? "collapsed" : ""}">${html}</div>
+      ${isLong && !isStreaming ? `<button class="msg-toggle" onclick="toggleMsg(this, ${index})">${isExpanded ? "Show less" : "Show more"}</button>` : ""}
+      <div class="msg-time">${time}</div>
+    </div>`;
+}
+
+function toggleMsg(btn, index) {
+  if (state.expandedMsgs.has(index)) {
+    state.expandedMsgs.delete(index);
+  } else {
+    state.expandedMsgs.add(index);
+  }
+  const body = btn.previousElementSibling;
+  const collapsed = body.classList.toggle("collapsed");
+  btn.textContent = collapsed ? "Show more" : "Show less";
+}
+
+function renderMailbox(files) {
+  const el = document.getElementById("mailbox-files");
+  const names = Object.keys(files).sort();
+  if (!names.length) {
+    el.innerHTML = '<div style="color:var(--text-dim);font-size:12px">No mailbox files</div>';
+    return;
+  }
+
+  // Save current open/closed state before re-render
+  el.querySelectorAll("details.mailbox-file").forEach((d) => {
+    const name = d.querySelector("summary")?.textContent;
+    if (name) state.mailboxState[name] = d.open;
   });
-  const data = await response.json();
-  if (!response.ok) {
-    setOverviewMessage(data.error || "create run failed");
-    return;
-  }
-  state.selectedRunId = data.run_id;
-  state.currentRun = data;
-  await loadRuns();
-  renderCurrentRun();
-}
 
-async function continueSelectedRun() {
-  if (!state.currentRun || !state.currentRun.can_continue) {
-    return;
-  }
-  setOverviewMessage("继续处理中...");
-  const response = await fetch(`${API_ROOT}/api/runs/${state.currentRun.run_id}/continue`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({}),
+  el.innerHTML = names
+    .map((name) => {
+      // Preserve user's open/closed choice; default to closed after first render
+      const isOpen = state.mailboxState[name] !== undefined
+        ? state.mailboxState[name]
+        : Object.keys(state.mailboxState).length === 0; // first render: open
+      return `
+    <details class="mailbox-file" ${isOpen ? "open" : ""}>
+      <summary>${esc(name)}</summary>
+      <pre>${esc(files[name])}</pre>
+    </details>`;
+    })
+    .join("");
+
+  // Listen for toggle events to track state
+  el.querySelectorAll("details.mailbox-file").forEach((d) => {
+    d.addEventListener("toggle", () => {
+      const name = d.querySelector("summary")?.textContent;
+      if (name) state.mailboxState[name] = d.open;
+    });
   });
-  const data = await response.json();
-  if (!response.ok) {
-    setOverviewMessage(data.error || "continue failed");
-    return;
-  }
-  state.currentRun = data;
-  await loadRuns();
-  renderCurrentRun();
 }
 
-async function submitPlanApproval(runId, approved) {
-  const payload = {
-    approved,
-    comment: document.getElementById("plan-comment")?.value || "",
-    checkpoint_step_indices: approved ? selectedCheckpointSteps() : [],
-  };
-  const response = await fetch(`${API_ROOT}/api/runs/${runId}/plan-approval`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  const data = await response.json();
-  state.currentRun = data;
-  await loadRuns();
-  renderCurrentRun();
-}
+function updateActions(roomState, busy, autoMode) {
+  const onboard = document.getElementById("btn-onboard");
+  const next = document.getElementById("btn-next");
+  const autoBtn = document.getElementById("btn-auto");
+  const approve = document.getElementById("btn-approve");
+  const reject = document.getElementById("btn-reject");
+  const taskBar = document.getElementById("task-bar");
+  const interveneBar = document.getElementById("intervene-bar");
 
-async function submitCheckpointApproval(runId, approved) {
-  const awaitingStep = (state.currentRun.steps || []).find((step) => step.status === "awaiting_approval");
-  if (!awaitingStep) {
-    return;
-  }
-  const payload = {
-    approved,
-    step_index: awaitingStep.step_index,
-    comment: document.getElementById("checkpoint-comment")?.value || "",
-  };
-  const response = await fetch(`${API_ROOT}/api/runs/${runId}/checkpoint-approval`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  const data = await response.json();
-  state.currentRun = data;
-  await loadRuns();
-  renderCurrentRun();
-}
+  // Task input bar: show only in awaiting_task state
+  taskBar.style.display = roomState === "awaiting_task" ? "flex" : "none";
 
-async function submitFinalApproval(runId, approved) {
-  const payload = {
-    approved,
-    comment: document.getElementById("final-comment")?.value || "",
-  };
-  const response = await fetch(`${API_ROOT}/api/runs/${runId}/final-approval`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  const data = await response.json();
-  state.currentRun = data;
-  await loadRuns();
-  renderCurrentRun();
-}
+  // Auto button text
+  if (autoMode) {
+    autoBtn.textContent = "⏸ Pause";
+    autoBtn.classList.add("pause");
+    autoBtn.classList.remove("auto");
+  } else {
+    autoBtn.textContent = "▶ Full-Auto";
+    autoBtn.classList.remove("pause");
+    autoBtn.classList.add("auto");
+  }
 
-function renderProviders() {
-  providersNode.innerHTML = "";
-  populateProviderSelects();
-  if (state.providers.length === 0) {
-    providersNode.innerHTML = `<article class="card muted-card">backend unavailable</article>`;
-    return;
-  }
-  for (const provider of state.providers) {
-    const notes = (provider.notes || []).map((note) => `<li>${escapeHtml(note)}</li>`).join("");
-    const capabilities = (provider.capabilities || [])
-      .map((item) => `<span class="tag">${escapeHtml(item)}</span>`)
-      .join("");
-    providersNode.innerHTML += `
-      <article class="card">
-        <strong>${escapeHtml(provider.name)}</strong>
-        <div class="meta">available: ${provider.available ? "yes" : "no"}</div>
-        <div class="meta">version: ${escapeHtml(provider.version)}</div>
-        <div class="meta">executable: ${escapeHtml(provider.executable || "-")}</div>
-        <div class="tag-row">${capabilities}</div>
-        <ul class="notes">${notes}</ul>
-      </article>
-    `;
-  }
-}
-
-function populateProviderSelects() {
-  const availableProviders = state.providers.filter((provider) => provider.available).map((provider) => provider.name);
-  fillSelect(executorSelect, availableProviders, "codex");
-  fillSelect(reviewerSelect, availableProviders, "claude");
-  fillSelect(verifierSelect, ["", ...availableProviders], "claude", true);
-  document.getElementById("create-run-button").disabled = availableProviders.length === 0;
-}
-
-function fillSelect(node, values, preferredValue, allowEmpty = false) {
-  node.innerHTML = "";
-  const options = values.length > 0 ? values : allowEmpty ? [""] : [];
-  for (const value of options) {
-    const option = document.createElement("option");
-    option.value = value;
-    option.textContent = value || "none";
-    node.appendChild(option);
-  }
-  if (preferredValue && options.includes(preferredValue)) {
-    node.value = preferredValue;
-  } else if (allowEmpty) {
-    node.value = "";
-  }
-}
-
-function renderRuns() {
-  runsNode.innerHTML = "";
-  if (state.runs.length === 0) {
-    runsNode.innerHTML = `<article class="card muted-card">暂无运行记录</article>`;
-    return;
-  }
-  for (const run of state.runs) {
-    const selected = run.run_id === state.selectedRunId ? " selected-card" : "";
-    runsNode.innerHTML += `
-      <button class="card button-card${selected}" data-run-id="${escapeHtml(run.run_id)}" type="button">
-        <strong>${escapeHtml(run.run_id)}</strong>
-        <div class="meta">${escapeHtml(run.state)}</div>
-        <div class="meta">${escapeHtml(run.task || "").slice(0, 80)}</div>
-      </button>
-    `;
-  }
-}
-
-function renderCurrentRun() {
-  if (!state.currentRun) {
-    setOverviewMessage("还没有选择 run。");
-    actionConsoleNode.className = "action-console empty";
-    actionConsoleNode.textContent = "等待创建或选择一个 run。";
-    stepsNode.innerHTML = "";
-    approvalsNode.innerHTML = "";
-    timelineNode.innerHTML = "";
-    findingsNode.innerHTML = "";
-    artifactsNode.innerHTML = "";
-    resultsNode.innerHTML = "";
-    continueButton.disabled = true;
+  if (busy) {
+    onboard.disabled = true;
+    next.disabled = true;
+    autoBtn.disabled = autoMode ? false : true; // allow pause even when busy
+    approve.disabled = true;
+    reject.disabled = true;
     return;
   }
 
-  const run = state.currentRun;
-  continueButton.disabled = !run.can_continue;
-  runOverviewNode.className = "overview";
-  runOverviewNode.innerHTML = `
-    <strong>${escapeHtml(run.run_id)}</strong>
-    <div class="meta">state: ${escapeHtml(run.state)}</div>
-    <div class="meta">task: ${escapeHtml(run.task)}</div>
-    <div class="meta">approval mode: ${escapeHtml(run.approval_mode || "once")}</div>
-    <div class="meta">current step index: ${escapeHtml(String(run.current_step_index || 0))}</div>
-    <div class="meta">generated at: ${escapeHtml(run.generated_at || "-")}</div>
-  `;
-
-  actionConsoleNode.className = "action-console";
-  actionConsoleNode.innerHTML = renderActionConsole(run);
-  renderCardList(stepsNode, run.steps || [], renderStepCard);
-  renderCardList(approvalsNode, run.approvals || [], renderApprovalCard, "暂无审批记录");
-  renderCardList(timelineNode, run.timeline || [], renderTimelineCard, "暂无时间线记录");
-  renderCardList(findingsNode, run.findings || [], renderFindingCard, "暂无 findings");
-  renderCardList(artifactsNode, run.artifacts || [], renderArtifactCard, "暂无产物");
-  renderCardList(resultsNode, run.task_results || [], renderResultCard, "暂无命令记录");
+  const isWorking = roomState === "working";
+  onboard.disabled = roomState !== "onboarding";
+  next.disabled = !isWorking;
+  autoBtn.disabled = !isWorking && !autoMode;
+  approve.disabled = roomState === "completed" || roomState === "onboarding" || roomState === "awaiting_task";
+  reject.disabled = roomState === "completed" || roomState === "onboarding" || roomState === "awaiting_task";
 }
 
-function renderActionConsole(run) {
-  if (run.can_approve_plan) {
-    return `
-      <p>计划讨论已结束。你现在可以勾选哪些步骤需要在执行后暂停审批；如果全部不勾选，就会一次性执行到最终审批。</p>
-      <div class="stack compact">${(run.steps || []).map(renderCheckpointOption).join("")}</div>
-      <label class="wide"><span>计划审批备注</span><textarea id="plan-comment" rows="3"></textarea></label>
-      <div class="inline-actions">
-        <button data-action="approve-plan" type="button">批准计划并开始执行</button>
-        <button data-action="reject-plan" class="secondary" type="button">要求继续改计划</button>
-      </div>
-    `;
-  }
-  if (run.can_approve_checkpoint) {
-    const awaitingStep = (run.steps || []).find((step) => step.status === "awaiting_approval");
-    return `
-      <p>当前已经执行到 checkpoint，需要你决定是否继续。</p>
-      <div class="card">
-        <strong>Step ${escapeHtml(String(awaitingStep?.step_index || "-"))}: ${escapeHtml(awaitingStep?.title || "")}</strong>
-        <div class="meta">${escapeHtml(awaitingStep?.detail || "")}</div>
-      </div>
-      <label class="wide"><span>节点审批备注</span><textarea id="checkpoint-comment" rows="3"></textarea></label>
-      <div class="inline-actions">
-        <button data-action="approve-checkpoint" type="button">批准并继续</button>
-        <button data-action="reject-checkpoint" class="secondary" type="button">要求返工</button>
-      </div>
-    `;
-  }
-  if (run.can_finalize) {
-    return `
-      <p>全部步骤已执行完成，等待最终人工确认。</p>
-      <label class="wide"><span>最终审批备注</span><textarea id="final-comment" rows="3"></textarea></label>
-      <div class="inline-actions">
-        <button data-action="approve-final" type="button">批准交付</button>
-        <button data-action="reject-final" class="secondary" type="button">要求继续修改</button>
-      </div>
-    `;
-  }
-  if (run.state === "plan_revision") {
-    return "<p>Reviewer 或用户要求修订计划。点击上方“继续执行”会继续计划讨论。</p>";
-  }
-  if (run.state === "implementing") {
-    return "<p>系统正在按已批准计划推进。若当前没有自动继续，请点击上方“继续执行”。</p>";
-  }
-  if (run.state === "completed") {
-    return "<p>Run 已完成。你仍然可以回看全部步骤、产物和审批记录。</p>";
-  }
-  if (run.state === "blocked") {
-    return "<p>Run 已阻塞。请检查 findings、review 和命令记录，决定是否继续人工处理。</p>";
-  }
-  return "<p>等待下一步动作。</p>";
-}
+// --- Actions ---
 
-function renderCheckpointOption(step) {
-  return `
-    <label class="checkbox-card">
-      <input class="checkpoint-toggle" type="checkbox" value="${escapeHtml(String(step.step_index))}" />
-      <span><strong>Step ${escapeHtml(String(step.step_index))}</strong> ${escapeHtml(step.title)}</span>
-    </label>
-  `;
-}
-
-function renderStepCard(step) {
-  return `
-    <article class="card">
-      <strong>Step ${escapeHtml(String(step.step_index))}: ${escapeHtml(step.title)}</strong>
-      <div class="meta">status: ${escapeHtml(step.status)}</div>
-      <div class="meta">checkpoint: ${step.requires_approval ? "yes" : "no"}</div>
-      <pre>${escapeHtml(step.detail || "")}</pre>
-    </article>
-  `;
-}
-
-function renderApprovalCard(approval) {
-  return `
-    <article class="card">
-      <strong>${escapeHtml(approval.stage)}</strong>
-      <div class="meta">approved: ${String(approval.approved)}</div>
-      <div class="meta">${escapeHtml(approval.comment || "")}</div>
-    </article>
-  `;
-}
-
-function renderTimelineCard(event) {
-  return `
-    <article class="card">
-      <strong>${escapeHtml(event.state)}</strong>
-      <div class="meta">${escapeHtml(event.message)}</div>
-    </article>
-  `;
-}
-
-function renderFindingCard(finding) {
-  return `
-    <article class="card">
-      <strong>${escapeHtml(finding.key)} · ${escapeHtml(finding.title)}</strong>
-      <div class="meta">${escapeHtml(finding.severity)} / ${escapeHtml(finding.status)}</div>
-      <pre>${escapeHtml(finding.detail || "")}</pre>
-    </article>
-  `;
-}
-
-function renderArtifactCard(artifact) {
-  return `
-    <article class="card">
-      <strong>${escapeHtml(artifact.kind)} v${escapeHtml(String(artifact.version))}</strong>
-      <div class="meta">${escapeHtml(artifact.path)}</div>
-      <pre>${escapeHtml(artifact.content || "")}</pre>
-    </article>
-  `;
-}
-
-function renderResultCard(result) {
-  return `
-    <article class="card">
-      <strong>${escapeHtml(result.role)} · ${escapeHtml(result.provider)} · ${escapeHtml(result.operation)}</strong>
-      <div class="meta">success: ${String(result.success)} / exit: ${escapeHtml(String(result.exit_code))}</div>
-      <div class="meta">duration: ${escapeHtml(String(result.duration_ms))} ms / ${escapeHtml(result.created_at || "")}</div>
-      <div class="meta">command: ${escapeHtml((result.command || []).join(" "))}</div>
-      <pre>${escapeHtml(result.output_text || result.stdout || result.stderr || "")}</pre>
-    </article>
-  `;
-}
-
-function renderCardList(node, items, renderItem, emptyText = "暂无数据") {
-  node.innerHTML = "";
-  if (!items || items.length === 0) {
-    node.innerHTML = `<article class="card muted-card">${escapeHtml(emptyText)}</article>`;
-    return;
-  }
-  for (const item of items) {
-    node.innerHTML += renderItem(item);
+async function doNext(action) {
+  if (!state.selectedRoomId) return;
+  try {
+    const data = await api("POST", `/api/rooms/${state.selectedRoomId}/next`, { action });
+    renderRoom(data);
+    await loadRooms();
+  } catch (err) {
+    showError(err.message);
   }
 }
 
-function selectedCheckpointSteps() {
-  return Array.from(document.querySelectorAll(".checkpoint-toggle:checked")).map((node) => Number(node.value));
+async function doApprove(decision) {
+  if (!state.selectedRoomId) return;
+  const comment = prompt(`Comment for ${decision}:`, "") || "";
+  try {
+    const data = await api("POST", `/api/rooms/${state.selectedRoomId}/approve`, { decision, comment });
+    renderRoom(data);
+    await loadRooms();
+  } catch (err) {
+    showError(err.message);
+  }
 }
 
-function setOverviewMessage(message) {
-  runOverviewNode.className = "overview empty";
-  runOverviewNode.textContent = message;
+async function doIntervene() {
+  if (!state.selectedRoomId) return;
+  const input = document.getElementById("intervene-input");
+  const target = document.getElementById("intervene-target").value;
+  const message = input.value.trim();
+  if (!message) return;
+
+  try {
+    const data = await api("POST", `/api/rooms/${state.selectedRoomId}/approve`, { decision: "intervene", message, target });
+    renderRoom(data);
+    input.value = "";
+  } catch (err) {
+    showError(err.message);
+  }
 }
 
-function escapeHtml(value) {
-  return String(value ?? "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
+async function submitTask() {
+  if (!state.selectedRoomId) return;
+  const input = document.getElementById("task-input");
+  const task = input.value.trim();
+  if (!task) return;
+
+  try {
+    const data = await api("POST", `/api/rooms/${state.selectedRoomId}/task`, { task });
+    renderRoom(data);
+    input.value = "";
+  } catch (err) {
+    showError(err.message);
+  }
 }
 
-main();
+async function toggleAuto() {
+  if (!state.selectedRoomId) return;
+  // Check current auto_mode from latest room data
+  const roomData = await api("GET", `/api/rooms/${state.selectedRoomId}`);
+  const isAuto = roomData.auto_mode || false;
+
+  try {
+    const data = await api("POST", `/api/rooms/${state.selectedRoomId}/auto`, {
+      action: isAuto ? "stop" : "start",
+    });
+    renderRoom(data);
+  } catch (err) {
+    showError(err.message);
+  }
+}
+
+function showError(msg) {
+  const el = document.getElementById("chat-messages");
+  el.innerHTML += `
+    <div class="message system" style="border-left-color:var(--reject);background:rgba(239,83,80,0.1)">
+      <div class="msg-header" style="color:var(--reject)">ERROR</div>
+      <div class="msg-body">${esc(msg)}</div>
+      <div class="msg-time">${new Date().toLocaleTimeString()}</div>
+    </div>`;
+  el.scrollTop = el.scrollHeight;
+}
+
+// --- Markdown renderer (lightweight) ---
+
+function md(raw) {
+  // Escape HTML first, then apply markdown
+  let s = esc(raw);
+
+  // Code blocks: ```...```
+  s = s.replace(/```(\w*)\n?([\s\S]*?)```/g, '<pre class="md-code"><code>$2</code></pre>');
+
+  // Inline code: `...`
+  s = s.replace(/`([^`]+)`/g, '<code class="md-inline">$1</code>');
+
+  // Headers: # ## ###
+  s = s.replace(/^### (.+)$/gm, '<h4 class="md-h">$1</h4>');
+  s = s.replace(/^## (.+)$/gm, '<h3 class="md-h">$1</h3>');
+  s = s.replace(/^# (.+)$/gm, '<h2 class="md-h">$1</h2>');
+
+  // Bold + Italic: ***text***
+  s = s.replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>');
+
+  // Bold: **text**
+  s = s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+
+  // Italic: *text*
+  s = s.replace(/(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g, '<em>$1</em>');
+
+  // Unordered list: - item
+  s = s.replace(/^- (.+)$/gm, '<li>$1</li>');
+  s = s.replace(/(<li>.*<\/li>\n?)+/g, '<ul class="md-list">$&</ul>');
+
+  // Ordered list: 1. item
+  s = s.replace(/^\d+\. (.+)$/gm, '<li>$1</li>');
+
+  // Horizontal rule: ---
+  s = s.replace(/^---$/gm, '<hr class="md-hr">');
+
+  return s;
+}
+
+function esc(s) {
+  const d = document.createElement("div");
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+// --- Boot ---
+init();

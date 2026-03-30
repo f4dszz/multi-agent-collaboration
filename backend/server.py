@@ -1,209 +1,225 @@
+"""HTTP Server - 精简的6个端点。
+
+GET  /api/health
+GET  /api/rooms              → 列出所有room
+POST /api/rooms              → 创建room
+GET  /api/rooms/{id}         → room详情 + 消息流 + 邮箱文件
+POST /api/rooms/{id}/next    → 触发下一轮
+POST /api/rooms/{id}/approve → 用户审批/驳回/干预
+"""
+
 from __future__ import annotations
 
 import json
-import sys
-from http import HTTPStatus
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from mimetypes import guess_type
+import re
+import traceback
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
-if __package__ in {None, ""}:
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from app.router import Router
+from app.session_mgr import SessionManager
+from app.store import Store
 
-from backend.app.services.cli_adapters import CliAdapterError
-from backend.app.services.runtime_service import RuntimeWorkflowService
-
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-FRONTEND_ROOT = PROJECT_ROOT / "frontend" / "site"
-RUNTIME_ROOT = PROJECT_ROOT / "runtime"
-SERVICE = RuntimeWorkflowService(RUNTIME_ROOT)
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+RUNTIME_ROOT = PROJECT_ROOT / "backend" / "runtime"
+FRONTEND_DIR = PROJECT_ROOT / "frontend" / "site"
+DB_PATH = RUNTIME_ROOT / "orchestrator.db"
 
 
-class ApiHandler(BaseHTTPRequestHandler):
-    server_version = "LocalAgentWorkflowServer/0.1"
+def create_app() -> tuple[Store, SessionManager, Router]:
+    store = Store(DB_PATH)
+    store.initialize()
+    session_mgr = SessionManager()
+    router = Router(store, session_mgr, RUNTIME_ROOT)
+    return store, session_mgr, router
 
-    def do_OPTIONS(self) -> None:  # noqa: N802
-        self.send_response(HTTPStatus.NO_CONTENT)
-        self._send_common_headers()
+
+store, session_mgr, router = create_app()
+
+
+class Handler(BaseHTTPRequestHandler):
+    """极简HTTP handler。"""
+
+    def do_GET(self) -> None:
+        path = unquote(urlparse(self.path).path).rstrip("/")
+
+        if path == "/api/health":
+            self._json_response({"status": "ok", "runtime_root": str(RUNTIME_ROOT)})
+
+        elif path == "/api/rooms":
+            rooms = store.list_rooms()
+            self._json_response(rooms)
+
+        elif (m := re.match(r"^/api/rooms/([^/]+)$", path)):
+            room_id = m.group(1)
+            snapshot = router._room_snapshot(room_id)
+            if snapshot["room"] is None:
+                self._json_response({"error": "Room not found"}, status=404)
+            else:
+                self._json_response(snapshot)
+
+        elif path == "" or path == "/" or path == "/index.html":
+            self._serve_static("index.html")
+        elif path.startswith("/"):
+            self._serve_static(path.lstrip("/"))
+        else:
+            self._json_response({"error": "Not found"}, status=404)
+
+    def do_POST(self) -> None:
+        path = unquote(urlparse(self.path).path).rstrip("/")
+        body = self._read_body()
+
+        try:
+            if path == "/api/rooms":
+                room_id = body.get("room_id", "")
+                workspace = body.get("workspace", "")
+                task = body.get("task", "")
+                executor_role = body.get("executor_role", "执行人")
+                reviewer_role = body.get("reviewer_role", "监督人")
+                executor_provider = body.get("executor_provider", "claude")
+                reviewer_provider = body.get("reviewer_provider", "claude")
+
+                if not room_id or not workspace:
+                    self._json_response({"error": "room_id and workspace required"}, status=400)
+                    return
+
+                snapshot = router.create_room(
+                    room_id, workspace, task,
+                    executor_role, reviewer_role,
+                    executor_provider, reviewer_provider,
+                )
+                self._json_response(snapshot, status=201)
+
+            elif (m := re.match(r"^/api/rooms/([^/]+)/next$", path)):
+                room_id = m.group(1)
+                action = body.get("action", "auto")
+
+                if action == "onboard":
+                    snapshot = router.onboard(room_id)
+                elif action == "auto":
+                    # 自动判断轮到谁
+                    room = store.get_room(room_id)
+                    last = store.get_latest_message(room_id)
+                    if not last or last["sender"] in ("system", "user", "reviewer"):
+                        turn = "executor"
+                    else:
+                        turn = "reviewer"
+                    snapshot = router.run_round(room_id, turn)
+                elif action in ("executor", "reviewer"):
+                    snapshot = router.run_round(room_id, action)
+                else:
+                    self._json_response({"error": f"Unknown action: {action}"}, status=400)
+                    return
+
+                self._json_response(snapshot)
+
+            elif (m := re.match(r"^/api/rooms/([^/]+)/task$", path)):
+                room_id = m.group(1)
+                task = body.get("task", "")
+                if not task:
+                    self._json_response({"error": "task is required"}, status=400)
+                    return
+                snapshot = router.assign_task(room_id, task)
+                self._json_response(snapshot)
+
+            elif (m := re.match(r"^/api/rooms/([^/]+)/auto$", path)):
+                room_id = m.group(1)
+                action = body.get("action", "start")
+                if action == "start":
+                    snapshot = router.start_auto(room_id)
+                else:
+                    snapshot = router.stop_auto(room_id)
+                self._json_response(snapshot)
+
+            elif (m := re.match(r"^/api/rooms/([^/]+)/approve$", path)):
+                room_id = m.group(1)
+                decision = body.get("decision", "approve")
+                comment = body.get("comment", "")
+                target = body.get("target")
+                message = body.get("message", "")
+
+                if decision == "approve":
+                    snapshot = router.approve(room_id, comment)
+                elif decision == "reject":
+                    snapshot = router.reject(room_id, comment)
+                elif decision == "intervene" and message:
+                    snapshot = router.user_message(room_id, message, target)
+                else:
+                    self._json_response({"error": "Invalid decision"}, status=400)
+                    return
+
+                self._json_response(snapshot)
+
+            else:
+                self._json_response({"error": "Not found"}, status=404)
+
+        except Exception as exc:
+            traceback.print_exc()
+            self._json_response({"error": str(exc)}, status=500)
+
+    def do_OPTIONS(self) -> None:
+        self.send_response(204)
+        self._cors_headers()
         self.end_headers()
 
-    def do_GET(self) -> None:  # noqa: N802
-        parsed = urlparse(self.path)
-        if parsed.path == "/api/health":
-            return self._json_response(
-                {
-                    "status": "ok",
-                    "project_root": str(PROJECT_ROOT),
-                    "runtime_root": str(RUNTIME_ROOT),
-                    "default_workspace": str(PROJECT_ROOT),
-                }
-            )
-        if parsed.path == "/api/providers":
-            return self._json_response({"providers": SERVICE.get_provider_statuses()})
-        if parsed.path == "/api/last-run":
-            return self._json_response({"run": SERVICE.get_last_run()})
-        if parsed.path == "/api/runs":
-            return self._json_response({"runs": SERVICE.list_runs()})
-        if parsed.path.startswith("/api/runs/"):
-            run_id = parsed.path.removeprefix("/api/runs/").strip("/")
-            if run_id and "/" not in run_id:
-                return self._json_response({"run": SERVICE.get_run(run_id)})
-        if parsed.path == "/api":
-            return self._json_response(
-                {
-                    "message": "Local Agent Workflow Orchestrator backend is running.",
-                    "endpoints": [
-                        "/api/health",
-                        "/api/providers",
-                        "/api/last-run",
-                        "/api/runs",
-                        "/api/runs/{run_id}",
-                        "/api/runs/{run_id}/continue",
-                        "/api/runs/{run_id}/plan-approval",
-                        "/api/runs/{run_id}/checkpoint-approval",
-                        "/api/runs/{run_id}/final-approval",
-                        "/api/workflows/plan-cycle",
-                        "/api/reviews/repo",
-                    ],
-                }
-            )
-        if self._serve_frontend_asset(parsed.path):
-            return
-        return self._json_response({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
-
-    def do_POST(self) -> None:  # noqa: N802
-        parsed = urlparse(self.path)
-        try:
-            payload = self._read_json()
-            if parsed.path == "/api/runs":
-                result = SERVICE.create_run(
-                    task=payload.get("task", "").strip(),
-                    workspace=payload.get("workspace", str(PROJECT_ROOT)),
-                    executor_provider=payload.get("executor_provider", "codex"),
-                    reviewer_provider=payload.get("reviewer_provider", "claude"),
-                    verifier_provider=payload.get("verifier_provider") or None,
-                    max_plan_rounds=int(payload.get("max_plan_rounds", 2)),
-                )
-                return self._json_response(result)
-            if parsed.path.startswith("/api/runs/"):
-                suffix = parsed.path.removeprefix("/api/runs/").strip("/")
-                parts = suffix.split("/")
-                if len(parts) == 2:
-                    run_id, action = parts
-                    if action == "continue":
-                        return self._json_response(SERVICE.continue_run(run_id))
-                    if action == "plan-approval":
-                        checkpoint_step_indices = [
-                            int(value) for value in payload.get("checkpoint_step_indices", []) if str(value).strip()
-                        ]
-                        return self._json_response(
-                            SERVICE.decide_plan(
-                                run_id,
-                                approved=bool(payload.get("approved", True)),
-                                comment=str(payload.get("comment", "")),
-                                checkpoint_step_indices=checkpoint_step_indices,
-                            )
-                        )
-                    if action == "checkpoint-approval":
-                        return self._json_response(
-                            SERVICE.decide_checkpoint(
-                                run_id,
-                                step_index=int(payload.get("step_index", 0)),
-                                approved=bool(payload.get("approved", True)),
-                                comment=str(payload.get("comment", "")),
-                            )
-                        )
-                    if action == "final-approval":
-                        return self._json_response(
-                            SERVICE.finalize_run(
-                                run_id,
-                                approved=bool(payload.get("approved", True)),
-                                comment=str(payload.get("comment", "")),
-                            )
-                        )
-            if parsed.path == "/api/workflows/plan-cycle":
-                result = SERVICE.run_plan_cycle(
-                    task=payload.get("task", "").strip(),
-                    workspace=payload.get("workspace", str(PROJECT_ROOT)),
-                    executor_provider=payload.get("executor_provider", "codex"),
-                    reviewer_provider=payload.get("reviewer_provider", "claude"),
-                    verifier_provider=payload.get("verifier_provider") or None,
-                    auto_revision=bool(payload.get("auto_revision", True)),
-                )
-                return self._json_response(result)
-            if parsed.path == "/api/reviews/repo":
-                result = SERVICE.run_repo_review(
-                    provider_name=payload.get("provider", "codex"),
-                    workspace=payload.get("workspace", str(PROJECT_ROOT)),
-                    prompt=payload.get("prompt", "Review the current repository changes strictly."),
-                    base_branch=payload.get("base_branch"),
-                )
-                return self._json_response(result)
-            return self._json_response({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
-        except CliAdapterError as exc:
-            return self._json_response({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
-        except Exception as exc:  # pragma: no cover - server safety path
-            return self._json_response({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
-
-    def log_message(self, format: str, *args: object) -> None:
-        return
-
-    def _read_json(self) -> dict[str, object]:
-        content_length = int(self.headers.get("Content-Length", "0"))
-        if content_length <= 0:
-            return {}
-        body = self.rfile.read(content_length)
-        if not body:
-            return {}
-        return json.loads(body.decode("utf-8"))
-
-    def _json_response(self, payload: dict[str, object], status: HTTPStatus = HTTPStatus.OK) -> None:
-        body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+    def _json_response(self, data, status: int = 200) -> None:
+        payload = json.dumps(data, ensure_ascii=False, default=str).encode("utf-8")
         self.send_response(status)
-        self._send_common_headers()
+        self._cors_headers()
         self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
-        self.wfile.write(body)
+        self.wfile.write(payload)
 
-    def _serve_frontend_asset(self, request_path: str) -> bool:
-        relative_path = "index.html" if request_path in {"", "/"} else unquote(request_path.lstrip("/"))
-        frontend_root = FRONTEND_ROOT.resolve()
-        candidate = (frontend_root / relative_path).resolve()
-        try:
-            candidate.relative_to(frontend_root)
-        except ValueError:
-            return False
-        if not candidate.is_file():
-            return False
+    def _read_body(self) -> dict:
+        length = int(self.headers.get("Content-Length", 0))
+        if length == 0:
+            return {}
+        raw = self.rfile.read(length).decode("utf-8", errors="replace")
+        return json.loads(raw)
 
-        body = candidate.read_bytes()
-        content_type = guess_type(candidate.name)[0] or "application/octet-stream"
-        self.send_response(HTTPStatus.OK)
-        self._send_common_headers()
-        self.send_header("Content-Type", f"{content_type}; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-        return True
-
-    def _send_common_headers(self) -> None:
+    def _cors_headers(self) -> None:
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
 
+    def _serve_static(self, rel_path: str) -> None:
+        file_path = FRONTEND_DIR / rel_path
+        if not file_path.is_file():
+            self._json_response({"error": "Not found"}, status=404)
+            return
+
+        content_types = {
+            ".html": "text/html; charset=utf-8",
+            ".css": "text/css; charset=utf-8",
+            ".js": "application/javascript; charset=utf-8",
+            ".json": "application/json; charset=utf-8",
+        }
+        ct = content_types.get(file_path.suffix, "application/octet-stream")
+        data = file_path.read_bytes()
+
+        self.send_response(200)
+        self.send_header("Content-Type", ct)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, fmt, *args) -> None:
+        print(f"[{self.log_date_time_string()}] {fmt % args}")
+
 
 def main() -> None:
-    server = ThreadingHTTPServer(("127.0.0.1", 8765), ApiHandler)
-    print("Backend listening on http://127.0.0.1:8765")
+    host, port = "127.0.0.1", 8765
+    server = ThreadingHTTPServer((host, port), Handler)
+    print(f"Server running at http://{host}:{port}")
+    print(f"Runtime root: {RUNTIME_ROOT}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        pass
-    finally:
-        server.server_close()
+        print("\nShutting down...")
+        server.shutdown()
+        store.close()
 
 
 if __name__ == "__main__":

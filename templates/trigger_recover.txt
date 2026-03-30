@@ -1,0 +1,6 @@
+你需要恢复之前的工作状态。请依次阅读：
+1. {onboarding_file} - 你的角色和职责
+2. {consensus_file} - 当前共识和进度
+3. {rounds_file} - 最近的轮次记录
+4. {inbox_file} - 对方最新的消息
+然后继续工作。
