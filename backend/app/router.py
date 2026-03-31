@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import shutil
 import threading
 import traceback
 from pathlib import Path
@@ -47,7 +48,7 @@ class Router:
         )
 
     def _run_in_background(self, room_id: str, fn, *args) -> None:
-        """在后台线程运行fn，完成后清除busy状态。"""
+        """在后台线程运行fn，完成后清除busy状态并检查auto继续。"""
         def wrapper():
             try:
                 fn(*args)
@@ -56,6 +57,20 @@ class Router:
                 self.store.add_message(room_id, "system", f"[Error] {exc}")
             finally:
                 self._busy[room_id] = False
+                # If auto mode is on and nobody is driving, start auto loop
+                if self._auto_mode.get(room_id, False) and not self._busy.get(room_id, False):
+                    self._busy[room_id] = True
+                    threading.Thread(target=_auto_wrapper, daemon=True).start()
+
+        def _auto_wrapper():
+            try:
+                self._auto_loop(room_id)
+            except Exception as exc:
+                traceback.print_exc()
+                self.store.add_message(room_id, "system", f"[Auto Error] {exc}")
+            finally:
+                self._busy[room_id] = False
+
         self._busy[room_id] = True
         t = threading.Thread(target=wrapper, daemon=True)
         t.start()
@@ -71,6 +86,15 @@ class Router:
             self.store.update_message(msg_id, "\n".join(chunks))
 
         return msg_id, chunks, on_chunk
+
+    def delete_room(self, room_id: str) -> None:
+        """删除room：停止auto、清DB、删文件夹。"""
+        self._auto_mode.pop(room_id, None)
+        self._busy.pop(room_id, None)
+        self.store.delete_room(room_id)
+        room_dir = self.runtime_root / "rooms" / room_id
+        if room_dir.exists():
+            shutil.rmtree(room_dir, ignore_errors=True)
 
     def create_room(
         self,

@@ -72,7 +72,25 @@ body {
   cursor: pointer;
   margin-bottom: 4px;
   transition: background 0.15s;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
 }
+
+.room-item-row { flex: 1; min-width: 0; }
+
+.room-delete {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-size: 16px;
+  cursor: pointer;
+  padding: 0 4px;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.room-item:hover .room-delete { opacity: 1; }
+.room-delete:hover { color: var(--reject); }
 
 .room-item:hover { background: var(--surface2); }
 .room-item.active { background: var(--surface2); border-left: 3px solid var(--accent); }

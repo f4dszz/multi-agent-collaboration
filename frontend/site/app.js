@@ -81,10 +81,14 @@ function renderRoomList() {
   el.innerHTML = state.rooms
     .map(
       (r) => `
-    <div class="room-item ${r.room_id === state.selectedRoomId ? "active" : ""}"
-         onclick="selectRoom('${r.room_id}')">
-      <div class="room-name">${esc(r.room_id)}</div>
-      <div class="room-meta">${esc(r.state)} &middot; ${esc(r.task || "no task")}</div>
+    <div class="room-item ${r.room_id === state.selectedRoomId ? "active" : ""}">
+      <div class="room-item-row" onclick="selectRoom('${r.room_id}')">
+        <div>
+          <div class="room-name">${esc(r.room_id)}</div>
+          <div class="room-meta">${esc(r.state)} &middot; ${esc(r.task || "no task")}</div>
+        </div>
+      </div>
+      <button class="room-delete" onclick="event.stopPropagation();deleteRoom('${r.room_id}')" title="Delete room">&times;</button>
     </div>`
     )
     .join("");
@@ -97,6 +101,24 @@ async function selectRoom(roomId) {
   state.mailboxState = {};
   renderRoomList();
   await loadRoom(roomId);
+}
+
+async function deleteRoom(roomId) {
+  if (!confirm(`Delete room "${roomId}"? This cannot be undone.`)) return;
+  try {
+    await api("DELETE", `/api/rooms/${roomId}`);
+    if (state.selectedRoomId === roomId) {
+      state.selectedRoomId = null;
+      state.msgCount = 0;
+      document.getElementById("chat-messages").innerHTML = "";
+      document.getElementById("room-title").textContent = "Select a room";
+      document.getElementById("room-state").textContent = "";
+      document.getElementById("mailbox-files").innerHTML = "";
+    }
+    await loadRooms();
+  } catch (err) {
+    showError(err.message);
+  }
 }
 
 // --- Room detail ---
@@ -264,7 +286,7 @@ function updateActions(roomState, busy, autoMode) {
   if (busy) {
     onboard.disabled = true;
     next.disabled = true;
-    autoBtn.disabled = autoMode ? false : true; // allow pause even when busy
+    autoBtn.disabled = false; // always allow toggling auto mode
     approve.disabled = true;
     reject.disabled = true;
     return;
@@ -273,7 +295,7 @@ function updateActions(roomState, busy, autoMode) {
   const isWorking = roomState === "working";
   onboard.disabled = roomState !== "onboarding";
   next.disabled = !isWorking;
-  autoBtn.disabled = !isWorking && !autoMode;
+  autoBtn.disabled = roomState === "completed" || roomState === "onboarding" || roomState === "awaiting_task";
   approve.disabled = roomState === "completed" || roomState === "onboarding" || roomState === "awaiting_task";
   reject.disabled = roomState === "completed" || roomState === "onboarding" || roomState === "awaiting_task";
 }

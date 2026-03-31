@@ -158,6 +158,20 @@ class Handler(BaseHTTPRequestHandler):
             traceback.print_exc()
             self._json_response({"error": str(exc)}, status=500)
 
+    def do_DELETE(self) -> None:
+        path = unquote(urlparse(self.path).path).rstrip("/")
+
+        try:
+            if (m := re.match(r"^/api/rooms/([^/]+)$", path)):
+                room_id = m.group(1)
+                router.delete_room(room_id)
+                self._json_response({"deleted": room_id})
+            else:
+                self._json_response({"error": "Not found"}, status=404)
+        except Exception as exc:
+            traceback.print_exc()
+            self._json_response({"error": str(exc)}, status=500)
+
     def do_OPTIONS(self) -> None:
         self.send_response(204)
         self._cors_headers()
@@ -181,7 +195,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _cors_headers(self) -> None:
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
 
     def _serve_static(self, rel_path: str) -> None:

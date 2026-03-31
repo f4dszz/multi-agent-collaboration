@@ -73,6 +73,13 @@ class Store:
         )
         self.conn.commit()
 
+    def delete_room(self, room_id: str) -> None:
+        """删除room及其所有关联数据。"""
+        self.conn.execute("DELETE FROM messages WHERE room_id = ?", (room_id,))
+        self.conn.execute("DELETE FROM sessions WHERE room_id = ?", (room_id,))
+        self.conn.execute("DELETE FROM rooms WHERE room_id = ?", (room_id,))
+        self.conn.commit()
+
     # --- Sessions ---
 
     def add_session(

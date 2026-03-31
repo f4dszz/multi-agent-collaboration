@@ -6,9 +6,20 @@
 
 ### 前置要求
 
-- Python 3.10+
-- Claude Code CLI（已安装并登录）
-- Node.js（Claude Code依赖）
+- **Python 3.10+** — 纯标准库，零第三方依赖
+- **Node.js 18+** — Claude Code CLI的运行时
+- **Claude Code CLI** — 安装并登录完成
+
+```bash
+# 验证Claude Code CLI是否可用
+claude --version
+
+# 如果未安装
+npm install -g @anthropic-ai/claude-code
+
+# 如果未登录
+claude auth login
+```
 
 ### 安装
 
@@ -133,6 +144,7 @@ runtime/rooms/{room_id}/.local_agent_ops/
 | GET | `/api/rooms` | 列出所有Room |
 | POST | `/api/rooms` | 创建Room（脚手架 + onboarding） |
 | GET | `/api/rooms/{id}` | Room详情 + 消息流 + 邮箱文件 |
+| DELETE | `/api/rooms/{id}` | 删除Room（DB + 文件夹） |
 | POST | `/api/rooms/{id}/next` | 触发下一轮（onboard/auto/executor/reviewer） |
 | POST | `/api/rooms/{id}/task` | 下发任务给执行人 |
 | POST | `/api/rooms/{id}/auto` | 开启/停止Full-Auto模式 |
