@@ -21,7 +21,13 @@ def render(template_name: str, **context: str) -> str:
     Returns:
         渲染后的字符串
     """
+    # 防止路径遍历攻击
+    if "/" in template_name or "\\" in template_name or ".." in template_name:
+        raise ValueError(f"Invalid template name: {template_name}")
     path = _TEMPLATES_DIR / f"{template_name}.txt"
+    resolved = path.resolve()
+    if not resolved.is_relative_to(_TEMPLATES_DIR.resolve()):
+        raise ValueError(f"Template path escape detected: {template_name}")
     if not path.exists():
         raise FileNotFoundError(f"Template not found: {path}")
     raw = path.read_text(encoding="utf-8")

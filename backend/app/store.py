@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,7 @@ class Store:
     def __init__(self, db_path: str | Path) -> None:
         self._db_path = str(db_path)
         self._conn: sqlite3.Connection | None = None
+        self._lock = threading.Lock()
 
     def initialize(self) -> None:
         """创建数据库和表。"""
@@ -52,33 +54,38 @@ class Store:
         reviewer_role: str = "监督人",
         task: str = "",
     ) -> dict[str, Any]:
-        self.conn.execute(
-            "INSERT INTO rooms (room_id, workspace, executor_role, reviewer_role, task, state, created_at) VALUES (?, ?, ?, ?, ?, 'onboarding', ?)",
-            (room_id, workspace, executor_role, reviewer_role, task, _now()),
-        )
-        self.conn.commit()
+        with self._lock:
+            self.conn.execute(
+                "INSERT INTO rooms (room_id, workspace, executor_role, reviewer_role, task, state, created_at) VALUES (?, ?, ?, ?, ?, 'onboarding', ?)",
+                (room_id, workspace, executor_role, reviewer_role, task, _now()),
+            )
+            self.conn.commit()
         return self.get_room(room_id)
 
     def get_room(self, room_id: str) -> dict[str, Any] | None:
-        row = self.conn.execute("SELECT * FROM rooms WHERE room_id = ?", (room_id,)).fetchone()
-        return dict(row) if row else None
+        with self._lock:
+            row = self.conn.execute("SELECT * FROM rooms WHERE room_id = ?", (room_id,)).fetchone()
+            return dict(row) if row else None
 
     def list_rooms(self) -> list[dict[str, Any]]:
-        rows = self.conn.execute("SELECT * FROM rooms ORDER BY created_at DESC").fetchall()
-        return [dict(r) for r in rows]
+        with self._lock:
+            rows = self.conn.execute("SELECT * FROM rooms ORDER BY created_at DESC").fetchall()
+            return [dict(r) for r in rows]
 
     def update_room_state(self, room_id: str, state: str) -> None:
-        self.conn.execute(
-            "UPDATE rooms SET state = ? WHERE room_id = ?", (state, room_id)
-        )
-        self.conn.commit()
+        with self._lock:
+            self.conn.execute(
+                "UPDATE rooms SET state = ? WHERE room_id = ?", (state, room_id)
+            )
+            self.conn.commit()
 
     def delete_room(self, room_id: str) -> None:
         """删除room及其所有关联数据。"""
-        self.conn.execute("DELETE FROM messages WHERE room_id = ?", (room_id,))
-        self.conn.execute("DELETE FROM sessions WHERE room_id = ?", (room_id,))
-        self.conn.execute("DELETE FROM rooms WHERE room_id = ?", (room_id,))
-        self.conn.commit()
+        with self._lock:
+            self.conn.execute("DELETE FROM messages WHERE room_id = ?", (room_id,))
+            self.conn.execute("DELETE FROM sessions WHERE room_id = ?", (room_id,))
+            self.conn.execute("DELETE FROM rooms WHERE room_id = ?", (room_id,))
+            self.conn.commit()
 
     # --- Sessions ---
 
@@ -90,24 +97,36 @@ class Store:
         provider: str,
         cli_session_id: str,
     ) -> None:
-        self.conn.execute(
-            "INSERT INTO sessions (session_id, room_id, role, provider, cli_session_id, alive, created_at) VALUES (?, ?, ?, ?, ?, 1, ?)",
-            (session_id, room_id, role, provider, cli_session_id, _now()),
-        )
-        self.conn.commit()
+        with self._lock:
+            self.conn.execute(
+                "INSERT INTO sessions (session_id, room_id, role, provider, cli_session_id, alive, created_at) VALUES (?, ?, ?, ?, ?, 1, ?)",
+                (session_id, room_id, role, provider, cli_session_id, _now()),
+            )
+            self.conn.commit()
 
     def get_sessions_for_room(self, room_id: str) -> list[dict[str, Any]]:
-        rows = self.conn.execute(
-            "SELECT * FROM sessions WHERE room_id = ?", (room_id,)
-        ).fetchall()
-        return [dict(r) for r in rows]
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT * FROM sessions WHERE room_id = ?", (room_id,)
+            ).fetchall()
+            return [dict(r) for r in rows]
 
     def update_session_alive(self, session_id: str, alive: bool) -> None:
-        self.conn.execute(
-            "UPDATE sessions SET alive = ? WHERE session_id = ?",
-            (1 if alive else 0, session_id),
-        )
-        self.conn.commit()
+        with self._lock:
+            self.conn.execute(
+                "UPDATE sessions SET alive = ? WHERE session_id = ?",
+                (1 if alive else 0, session_id),
+            )
+            self.conn.commit()
+
+    def update_session_cli_id(self, session_id: str, cli_session_id: str) -> None:
+        """更新session的CLI session ID（Codex首轮后回填真实thread_id）。"""
+        with self._lock:
+            self.conn.execute(
+                "UPDATE sessions SET cli_session_id = ? WHERE session_id = ?",
+                (cli_session_id, session_id),
+            )
+            self.conn.commit()
 
     # --- Messages ---
 
@@ -117,34 +136,38 @@ class Store:
         sender: str,
         content: str,
     ) -> int:
-        cursor = self.conn.execute(
-            "INSERT INTO messages (room_id, sender, content, created_at) VALUES (?, ?, ?, ?)",
-            (room_id, sender, content, _now()),
-        )
-        self.conn.commit()
-        return cursor.lastrowid
+        with self._lock:
+            cursor = self.conn.execute(
+                "INSERT INTO messages (room_id, sender, content, created_at) VALUES (?, ?, ?, ?)",
+                (room_id, sender, content, _now()),
+            )
+            self.conn.commit()
+            return cursor.lastrowid
 
     def get_messages(self, room_id: str, limit: int = 100) -> list[dict[str, Any]]:
-        rows = self.conn.execute(
-            "SELECT * FROM messages WHERE room_id = ? ORDER BY message_id ASC LIMIT ?",
-            (room_id, limit),
-        ).fetchall()
-        return [dict(r) for r in rows]
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT * FROM messages WHERE room_id = ? ORDER BY message_id ASC LIMIT ?",
+                (room_id, limit),
+            ).fetchall()
+            return [dict(r) for r in rows]
 
     def get_latest_message(self, room_id: str) -> dict[str, Any] | None:
-        row = self.conn.execute(
-            "SELECT * FROM messages WHERE room_id = ? ORDER BY message_id DESC LIMIT 1",
-            (room_id,),
-        ).fetchone()
-        return dict(row) if row else None
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT * FROM messages WHERE room_id = ? ORDER BY message_id DESC LIMIT 1",
+                (room_id,),
+            ).fetchone()
+            return dict(row) if row else None
 
     def update_message(self, message_id: int, content: str) -> None:
         """就地更新消息内容（用于流式输出）。"""
-        self.conn.execute(
-            "UPDATE messages SET content = ? WHERE message_id = ?",
-            (content, message_id),
-        )
-        self.conn.commit()
+        with self._lock:
+            self.conn.execute(
+                "UPDATE messages SET content = ? WHERE message_id = ?",
+                (content, message_id),
+            )
+            self.conn.commit()
 
 
 _SCHEMA = """\

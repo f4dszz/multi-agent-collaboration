@@ -1,9 +1,10 @@
 """Session Manager - 管理agent的持久CLI session。
 
-核心策略：
-- Claude Code: 用 --session-id 创建 + --resume 复用，agent保持完整记忆
-- 流式输出: 用 --output-format stream-json --verbose 实时读取思考过程
-- Codex: 降级为每次 exec + 极简角色前缀（无原生session持久化）
+轻量设计：
+- 一个通用 _run_stream() 管理所有CLI子进程生命周期
+- 各provider只负责：拼命令 + 写一个小的 line_parser 解析自己的JSONL行
+- Claude Code: --session-id / --resume, stream-json
+- Codex CLI: exec / exec resume, --json
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ import tempfile
 import threading
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Literal
 
@@ -23,7 +24,8 @@ from typing import Callable, Literal
 CLAUDE_CLI_JS = Path.home() / "AppData/Roaming/npm/node_modules/@anthropic-ai/claude-code/cli.js"
 
 Provider = Literal["claude", "codex"]
-OnChunk = Callable[[str, str], None]  # (event_type, content) -> None
+OnChunk = Callable[[str, str], None]       # (event_type, content) -> None
+LineParser = Callable[[dict], str | None]  # json_event -> extracted text or None
 
 
 @dataclass(slots=True)
@@ -56,6 +58,16 @@ class SessionManager:
 
     def __init__(self) -> None:
         self._sessions: dict[str, Session] = {}
+        self._active_procs: dict[str, subprocess.Popen] = {}
+        self._procs_lock = threading.Lock()
+        self._on_cli_session_update: Callable[[str, str], None] | None = None
+        self._codex_has_thread: set[str] = set()  # 已获取真实thread_id的session
+
+    def set_cli_session_update_callback(self, cb: Callable[[str, str], None]) -> None:
+        """设置回调：Codex首轮获取thread_id后通知外部持久化。"""
+        self._on_cli_session_update = cb
+
+    # --- Session CRUD ---
 
     def create_session(self, role: str, provider: Provider, workspace: str) -> Session:
         session_id = str(uuid.uuid4())[:8]
@@ -81,26 +93,6 @@ class SessionManager:
         self._sessions[session_id] = session
         return session
 
-    def send_message(
-        self, session_id: str, message: str,
-        timeout: int = 600, on_chunk: OnChunk | None = None,
-    ) -> SessionResult:
-        session = self._sessions.get(session_id)
-        if not session:
-            raise ValueError(f"Session not found: {session_id}")
-
-        if session.provider == "claude":
-            result = self._send_claude(session, message, timeout, on_chunk)
-        elif session.provider == "codex":
-            result = self._send_codex(session, message, timeout)
-        else:
-            raise ValueError(f"Unknown provider: {session.provider}")
-
-        session.round_count += 1
-        if not result.success:
-            session.alive = False
-        return result
-
     def get_session(self, session_id: str) -> Session | None:
         return self._sessions.get(session_id)
 
@@ -112,7 +104,133 @@ class SessionManager:
         if session:
             session.alive = False
 
-    # --- Claude Code (streaming) ---
+    # --- Message dispatch ---
+
+    def send_message(
+        self, session_id: str, message: str,
+        timeout: int = 600, on_chunk: OnChunk | None = None,
+    ) -> SessionResult:
+        session = self._sessions.get(session_id)
+        if not session:
+            raise ValueError(f"Session not found: {session_id}")
+
+        if session.provider == "claude":
+            result = self._send_claude(session, message, timeout, on_chunk)
+        elif session.provider == "codex":
+            result = self._send_codex(session, message, timeout, on_chunk)
+        else:
+            raise ValueError(f"Unknown provider: {session.provider}")
+
+        session.round_count += 1
+        if not result.success:
+            session.alive = False
+        return result
+
+    # --- Process management ---
+
+    def kill_active(self, session_id: str) -> bool:
+        """强制终止指定session的活跃子进程。"""
+        with self._procs_lock:
+            proc = self._active_procs.get(session_id)
+        if not proc:
+            return False
+        try:
+            proc.kill()
+            proc.wait(timeout=10)
+        except Exception:
+            pass
+        with self._procs_lock:
+            self._active_procs.pop(session_id, None)
+        return True
+
+    def cleanup_all(self) -> None:
+        """终止所有活跃子进程（服务关闭时调用）。"""
+        with self._procs_lock:
+            procs = list(self._active_procs.items())
+        for sid, proc in procs:
+            try:
+                proc.kill()
+                proc.wait(timeout=5)
+            except Exception:
+                pass
+        with self._procs_lock:
+            self._active_procs.clear()
+
+    # --- 通用流式进程运行器 ---
+
+    def _run_stream(
+        self, command: list[str], cwd: str, stdin_text: str,
+        timeout: int, session_id: str, line_parser: LineParser,
+    ) -> tuple[int, list[str], str, int]:
+        """启动CLI子进程，逐行读stdout并用line_parser解析JSONL。
+        返回 (returncode, collected_texts, stderr, duration_ms)。
+        """
+        started = time.perf_counter()
+        collected: list[str] = []
+        stderr_buf: list[str] = []
+
+        try:
+            proc = subprocess.Popen(
+                command, cwd=cwd,
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, encoding="utf-8", errors="replace",
+            )
+        except Exception as exc:
+            return (-1, [], str(exc), 0)
+
+        if stdin_text:
+            try:
+                proc.stdin.write(stdin_text)
+                proc.stdin.close()
+            except Exception:
+                pass
+
+        with self._procs_lock:
+            self._active_procs[session_id] = proc
+
+        def _drain_stderr():
+            for line in proc.stderr:
+                stderr_buf.append(line)
+        t = threading.Thread(target=_drain_stderr, daemon=True)
+        t.start()
+
+        try:
+            for line in proc.stdout:
+                if time.perf_counter() - started > timeout:
+                    proc.kill()
+                    proc.wait(timeout=10)
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    collected.append(line)
+                    continue
+                text = line_parser(event)
+                if text:
+                    collected.append(text)
+        except Exception:
+            pass
+
+        try:
+            remaining = max(5, timeout - (time.perf_counter() - started))
+            proc.wait(timeout=remaining)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=10)
+
+        t.join(timeout=5)
+        duration_ms = int((time.perf_counter() - started) * 1000)
+
+        with self._procs_lock:
+            self._active_procs.pop(session_id, None)
+
+        rc = proc.returncode if proc.returncode is not None else -1
+        return (rc, collected, "".join(stderr_buf), duration_ms)
+
+    # --- Claude Code ---
 
     def _send_claude(
         self, session: Session, message: str,
@@ -121,35 +239,64 @@ class SessionManager:
         node = shutil.which("node")
         if not node or not CLAUDE_CLI_JS.exists():
             raise RuntimeError("Claude Code CLI not available")
-
-        workspace = Path(session.workspace)
-        if not workspace.is_dir():
+        if not Path(session.workspace).is_dir():
             raise RuntimeError(f"Workspace does not exist: {session.workspace}")
 
         command = [node, str(CLAUDE_CLI_JS), "-p"]
-
         if session.round_count == 0:
             command.extend(["--session-id", session.cli_session_id])
         else:
             command.extend(["--resume", session.cli_session_id])
-
         command.extend([
-            "--output-format", "stream-json",
-            "--verbose",
+            "--output-format", "stream-json", "--verbose",
             "--permission-mode", "acceptEdits",
             "--add-dir", session.workspace,
         ])
 
-        return self._run_stream(
-            command=command, cwd=session.workspace,
-            stdin_text=message, timeout=timeout,
+        final_result: list[str] = []
+
+        def parser(event: dict) -> str | None:
+            etype = event.get("type", "")
+            if etype == "assistant":
+                for block in event.get("message", {}).get("content", []):
+                    if block.get("type") == "text":
+                        text = block.get("text", "")
+                        if text and on_chunk:
+                            on_chunk("text", text)
+                        return text
+                    elif block.get("type") == "tool_use":
+                        name = block.get("name", "unknown")
+                        inp = block.get("input", {})
+                        summary = f"[Tool: {name}]"
+                        if isinstance(inp, dict):
+                            if "command" in inp:
+                                summary = f"[Running: {inp['command'][:80]}]"
+                            elif "file_path" in inp:
+                                summary = f"[Reading: {inp['file_path']}]"
+                        if on_chunk:
+                            on_chunk("tool", summary)
+            elif etype == "result":
+                final_result.append(event.get("result", ""))
+            return None
+
+        rc, collected, stderr, duration_ms = self._run_stream(
+            command, session.workspace, message, timeout,
+            session.session_id, parser,
+        )
+        output = final_result[0] if final_result else "\n".join(collected)
+        return SessionResult(
             provider="claude", session_id=session.session_id,
-            on_chunk=on_chunk,
+            exit_code=rc, stdout="\n".join(collected), stderr=stderr,
+            duration_ms=duration_ms, success=(rc == 0),
+            output_text=output.strip() or "[No output]",
         )
 
-    # --- Codex (non-streaming) ---
+    # --- Codex CLI ---
 
-    def _send_codex(self, session: Session, message: str, timeout: int) -> SessionResult:
+    def _send_codex(
+        self, session: Session, message: str,
+        timeout: int, on_chunk: OnChunk | None = None,
+    ) -> SessionResult:
         executable = shutil.which("codex.cmd") or shutil.which("codex")
         if not executable:
             raise RuntimeError("Codex CLI not available")
@@ -161,195 +308,60 @@ class SessionManager:
         ) as f:
             output_file = f.name
 
-        command = [
-            executable, "exec",
-            "--skip-git-repo-check", "--ephemeral", "--full-auto",
-            "--sandbox", "workspace-write",
-            "--cd", session.workspace, "-o", output_file, "-",
-        ]
+        if session.session_id in self._codex_has_thread:
+            command = [
+                executable, "exec", "resume", session.cli_session_id,
+                "--skip-git-repo-check", "--full-auto",
+                "--json", "-o", output_file, "-",
+            ]
+        else:
+            command = [
+                executable, "exec",
+                "--skip-git-repo-check", "--full-auto",
+                "--sandbox", "workspace-write",
+                "--cd", session.workspace,
+                "--json", "-o", output_file, "-",
+            ]
 
-        result = self._run_blocking(
-            command=command, cwd=session.workspace,
-            stdin_text=message, timeout=timeout,
-            provider="codex", session_id=session.session_id,
-            output_file=output_file,
+        def parser(event: dict) -> str | None:
+            etype = event.get("type", "")
+            if etype == "thread.started":
+                tid = event.get("thread_id", "")
+                if tid:
+                    session.cli_session_id = tid
+                    self._codex_has_thread.add(session.session_id)
+                    if self._on_cli_session_update:
+                        self._on_cli_session_update(session.session_id, tid)
+            elif etype == "item.completed":
+                item = event.get("item", {})
+                itype = item.get("type", "")
+                text = item.get("text", "")
+                if itype == "agent_message" and text:
+                    if on_chunk:
+                        on_chunk("text", text)
+                    return text
+                elif itype == "reasoning" and text:
+                    if on_chunk:
+                        on_chunk("tool", f"[Thinking] {text[:200]}")
+            return None
+
+        rc, collected, stderr, duration_ms = self._run_stream(
+            command, session.workspace, message, timeout,
+            session.session_id, parser,
         )
-        Path(output_file).unlink(missing_ok=True)
-        return result
 
-    # --- Streaming process runner (Popen) ---
-
-    def _run_stream(
-        self, command: list[str], cwd: str, stdin_text: str,
-        timeout: int, provider: str, session_id: str,
-        on_chunk: OnChunk | None = None,
-    ) -> SessionResult:
-        started = time.perf_counter()
-        final_result = ""
-        collected_text: list[str] = []
-        stderr_buf: list[str] = []
-
-        try:
-            proc = subprocess.Popen(
-                command, cwd=cwd,
-                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, encoding="utf-8", errors="replace",
-            )
-        except Exception as exc:
-            return SessionResult(
-                provider=provider, session_id=session_id,
-                exit_code=-1, stdout="", stderr=str(exc),
-                duration_ms=0, success=False,
-                output_text=f"[Failed to start CLI: {exc}]",
-            )
-
-        # Send input and close stdin
-        if stdin_text:
+        output = "\n".join(collected)
+        if not output and Path(output_file).exists():
             try:
-                proc.stdin.write(stdin_text)
-                proc.stdin.close()
+                output = Path(output_file).read_text(encoding="utf-8")
             except Exception:
                 pass
+        Path(output_file).unlink(missing_ok=True)
 
-        # Read stderr in background thread
-        def _drain_stderr():
-            for line in proc.stderr:
-                stderr_buf.append(line)
-        t = threading.Thread(target=_drain_stderr, daemon=True)
-        t.start()
-
-        # Read stdout line by line (NDJSON)
-        try:
-            for line in proc.stdout:
-                # Check timeout
-                elapsed = time.perf_counter() - started
-                if elapsed > timeout:
-                    proc.kill()
-                    break
-
-                line = line.strip()
-                if not line:
-                    continue
-
-                try:
-                    event = json.loads(line)
-                except json.JSONDecodeError:
-                    collected_text.append(line)
-                    continue
-
-                etype = event.get("type", "")
-
-                if etype == "assistant":
-                    # Extract text content from assistant message
-                    msg = event.get("message", {})
-                    contents = msg.get("content", [])
-                    for block in contents:
-                        if block.get("type") == "text":
-                            text = block.get("text", "")
-                            if text:
-                                collected_text.append(text)
-                                if on_chunk:
-                                    on_chunk("text", text)
-                        elif block.get("type") == "tool_use":
-                            tool_name = block.get("name", "unknown")
-                            tool_input = block.get("input", {})
-                            # Show tool usage as thinking step
-                            summary = f"[Tool: {tool_name}]"
-                            if isinstance(tool_input, dict):
-                                # Show brief summary of what tool is doing
-                                if "command" in tool_input:
-                                    summary = f"[Running: {tool_input['command'][:80]}]"
-                                elif "file_path" in tool_input:
-                                    summary = f"[Reading: {tool_input['file_path']}]"
-                                elif "pattern" in tool_input:
-                                    summary = f"[Searching: {tool_input['pattern']}]"
-                            if on_chunk:
-                                on_chunk("tool", summary)
-
-                elif etype == "user":
-                    # Tool result — show what happened
-                    msg = event.get("message", {})
-                    contents = msg.get("content", [])
-                    for block in contents:
-                        if block.get("type") == "tool_result":
-                            content_text = block.get("content", "")
-                            is_error = block.get("is_error", False)
-                            if content_text and on_chunk:
-                                prefix = "[Error] " if is_error else ""
-                                # Truncate long tool results
-                                display = content_text[:300]
-                                if len(content_text) > 300:
-                                    display += "..."
-                                on_chunk("tool_result", f"{prefix}{display}")
-
-                elif etype == "result":
-                    final_result = event.get("result", "")
-                    # Show permission denials if any
-                    denials = event.get("permission_denials", [])
-                    if denials and on_chunk:
-                        for d in denials:
-                            on_chunk("permission", f"[Permission Denied] {d}")
-
-        except Exception:
-            pass
-
-        # Wait for process to finish
-        try:
-            proc.wait(timeout=max(5, timeout - (time.perf_counter() - started)))
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
-
-        t.join(timeout=2)
-        duration_ms = int((time.perf_counter() - started) * 1000)
-
-        output_text = final_result or "\n".join(collected_text)
-
+        timed_out = rc < 0
         return SessionResult(
-            provider=provider, session_id=session_id,
-            exit_code=proc.returncode or 0,
-            stdout="\n".join(collected_text),
-            stderr="".join(stderr_buf),
-            duration_ms=duration_ms,
-            success=(proc.returncode == 0),
-            output_text=output_text.strip(),
-        )
-
-    # --- Blocking process runner (for Codex) ---
-
-    def _run_blocking(
-        self, command: list[str], cwd: str, stdin_text: str,
-        timeout: int, provider: str, session_id: str,
-        output_file: str | None = None,
-    ) -> SessionResult:
-        started = time.perf_counter()
-        try:
-            completed = subprocess.run(
-                command, cwd=cwd, input=stdin_text,
-                capture_output=True, text=True,
-                encoding="utf-8", errors="replace", timeout=timeout,
-            )
-        except subprocess.TimeoutExpired:
-            duration_ms = int((time.perf_counter() - started) * 1000)
-            return SessionResult(
-                provider=provider, session_id=session_id,
-                exit_code=-1, stdout="", stderr="TIMEOUT",
-                duration_ms=duration_ms, success=False,
-                output_text="[Session timed out]",
-            )
-
-        duration_ms = int((time.perf_counter() - started) * 1000)
-        output_text = ""
-        if output_file and Path(output_file).exists():
-            output_text = Path(output_file).read_text(encoding="utf-8")
-        elif completed.stdout:
-            output_text = completed.stdout
-
-        return SessionResult(
-            provider=provider, session_id=session_id,
-            exit_code=completed.returncode,
-            stdout=completed.stdout, stderr=completed.stderr,
-            duration_ms=duration_ms,
-            success=completed.returncode == 0,
-            output_text=output_text.strip(),
+            provider="codex", session_id=session.session_id,
+            exit_code=rc, stdout="\n".join(collected), stderr=stderr,
+            duration_ms=duration_ms, success=(rc == 0),
+            output_text=output.strip() or ("[Session timed out]" if timed_out else "[No output]"),
         )

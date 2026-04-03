@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import shutil
 import threading
+import time
 import traceback
 from pathlib import Path
 from typing import Literal
@@ -27,15 +28,49 @@ Turn = Literal["executor", "reviewer"]
 class Router:
     """消息路由器。"""
 
+    MAX_AUTO_ROUNDS = 20       # 全自动模式最大轮次
+    MAX_AUTO_FAILURES = 3      # 连续失败N次自动暂停
+    MAX_ROUND_RETRIES = 2      # 单轮失败后重试次数
+    AUTO_ROUND_INTERVAL = 2    # 全自动轮次间隔（秒）
+
+    # 这些标记出现在输出中时，视为本轮失败
+    _ERROR_MARKERS = (
+        "[No output]", "[No response]", "[Session timed out]",
+        "[Failed", "[Error", "[Timeout",
+    )
+
     def __init__(self, store: Store, session_mgr: SessionManager, runtime_root: Path) -> None:
         self.store = store
         self.session_mgr = session_mgr
         self.runtime_root = runtime_root
         self._busy: dict[str, bool] = {}
-        self._auto_mode: dict[str, bool] = {}  # room_id → auto mode on/off
+        self._auto_mode: dict[str, bool] = {}
+        self._auto_paused: set[str] = set()   # 因失败暂停的room，用户发消息可恢复
+        self._interrupted: set[str] = set()   # 被用户打断的room，后台线程需检查
+        self._room_locks: dict[str, threading.Lock] = {}
+        self._meta_lock = threading.Lock()  # 保护 _room_locks 字典本身
+        # Codex首轮获取thread_id后回写DB
+        session_mgr.set_cli_session_update_callback(
+            lambda sid, cli_id: store.update_session_cli_id(sid, cli_id)
+        )
+
+    def _get_lock(self, room_id: str) -> threading.Lock:
+        """获取指定 room 的锁（不存在则创建）。"""
+        with self._meta_lock:
+            if room_id not in self._room_locks:
+                self._room_locks[room_id] = threading.Lock()
+            return self._room_locks[room_id]
 
     def is_busy(self, room_id: str) -> bool:
-        return self._busy.get(room_id, False)
+        with self._get_lock(room_id):
+            return self._busy.get(room_id, False)
+
+    def _check_interrupted(self, room_id: str) -> bool:
+        """检查是否被用户打断。如果是，清除标记并返回 True。"""
+        if room_id in self._interrupted:
+            self._interrupted.discard(room_id)
+            return True
+        return False
 
     def _ensure_session(self, session_row: dict, workspace: str) -> None:
         """确保DB里的session在SessionManager内存中存在（处理server重启）。"""
@@ -49,6 +84,8 @@ class Router:
 
     def _run_in_background(self, room_id: str, fn, *args) -> None:
         """在后台线程运行fn，完成后清除busy状态并检查auto继续。"""
+        lock = self._get_lock(room_id)
+
         def wrapper():
             try:
                 fn(*args)
@@ -56,22 +93,17 @@ class Router:
                 traceback.print_exc()
                 self.store.add_message(room_id, "system", f"[Error] {exc}")
             finally:
-                self._busy[room_id] = False
-                # If auto mode is on and nobody is driving, start auto loop
-                if self._auto_mode.get(room_id, False) and not self._busy.get(room_id, False):
-                    self._busy[room_id] = True
-                    threading.Thread(target=_auto_wrapper, daemon=True).start()
+                with lock:
+                    self._busy[room_id] = False
+                    should_auto = self._auto_mode.get(room_id, False)
+                if should_auto:
+                    # 重新用后台线程启动 auto loop
+                    self._start_auto_thread(room_id)
 
-        def _auto_wrapper():
-            try:
-                self._auto_loop(room_id)
-            except Exception as exc:
-                traceback.print_exc()
-                self.store.add_message(room_id, "system", f"[Auto Error] {exc}")
-            finally:
-                self._busy[room_id] = False
-
-        self._busy[room_id] = True
+        with lock:
+            if self._busy.get(room_id, False):
+                return  # 已经有线程在运行，不重复启动
+            self._busy[room_id] = True
         t = threading.Thread(target=wrapper, daemon=True)
         t.start()
 
@@ -89,12 +121,20 @@ class Router:
 
     def delete_room(self, room_id: str) -> None:
         """删除room：停止auto、清DB、删文件夹。"""
-        self._auto_mode.pop(room_id, None)
-        self._busy.pop(room_id, None)
+        with self._get_lock(room_id):
+            self._auto_mode.pop(room_id, None)
+            self._busy.pop(room_id, None)
+        # Kill any active processes for this room's sessions
+        sessions = self.store.get_sessions_for_room(room_id)
+        for s in sessions:
+            self.session_mgr.kill_active(s["session_id"])
         self.store.delete_room(room_id)
         room_dir = self.runtime_root / "rooms" / room_id
         if room_dir.exists():
             shutil.rmtree(room_dir, ignore_errors=True)
+        # 清理锁
+        with self._meta_lock:
+            self._room_locks.pop(room_id, None)
 
     def create_room(
         self,
@@ -140,8 +180,6 @@ class Router:
         room = self.store.get_room(room_id)
         if not room:
             raise ValueError(f"Room not found: {room_id}")
-        if self.is_busy(room_id):
-            return self._room_snapshot(room_id)
 
         self.store.add_message(room_id, "system", "Starting onboarding...")
         self._run_in_background(room_id, self._do_onboard, room_id)
@@ -173,6 +211,11 @@ class Router:
         # Replace streaming placeholder with final result
         self.store.update_message(msg_id, exec_result.output_text or "\n".join(chunks) or "[No response]")
 
+        # 中断检查：用户在executor onboarding期间点了interrupt
+        if self._check_interrupted(room_id):
+            self.store.add_message(room_id, "system", "[Onboarding interrupted by user]")
+            return
+
         # Onboard reviewer
         self.store.add_message(room_id, "system", f"[Onboarding {reviewer_role}...]")
         review_ctx = templates.get_room_context(
@@ -193,14 +236,12 @@ class Router:
         room = self.store.get_room(room_id)
         if not room:
             raise ValueError(f"Room not found: {room_id}")
-        if self.is_busy(room_id):
-            return self._room_snapshot(room_id)
 
         self._run_in_background(room_id, self._do_round, room_id, turn)
         return self._room_snapshot(room_id)
 
-    def _do_round(self, room_id: str, turn: Turn) -> None:
-        """实际执行一轮（在后台线程中运行）。"""
+    def _do_round(self, room_id: str, turn: Turn) -> bool:
+        """实际执行一轮（在后台线程中运行）。返回 True 表示成功。"""
         room = self.store.get_room(room_id)
         room_dir = self.runtime_root / "rooms" / room_id
         executor_role = room["executor_role"]
@@ -228,7 +269,15 @@ class Router:
         result = self.session_mgr.send_message(
             session_row["session_id"], message, on_chunk=on_chunk,
         )
-        self.store.update_message(msg_id, result.output_text or "\n".join(chunks) or "[No response]")
+        output = result.output_text or "\n".join(chunks) or "[No response]"
+        self.store.update_message(msg_id, output)
+
+        # 判定是否成功
+        if not result.success:
+            return False
+        if any(output.startswith(m) or output == m for m in self._ERROR_MARKERS):
+            return False
+        return True
 
     def approve(self, room_id: str, comment: str = "") -> dict:
         """用户审批：确认进入下一阶段。"""
@@ -268,9 +317,19 @@ class Router:
 
         self.store.add_message(room_id, "user", message)
 
+        # 如果auto因失败暂停，用户发任何消息即恢复auto
+        if room_id in self._auto_paused:
+            self._auto_paused.discard(room_id)
+            with self._get_lock(room_id):
+                self._auto_mode[room_id] = True
+            self.store.add_message(room_id, "system", "[Auto resumed by user — continuing...]")
+            if not self.is_busy(room_id):
+                self._start_auto_thread(room_id)
+            return self._room_snapshot(room_id)
+
         if target:
             if self.is_busy(room_id):
-                self.store.add_message(room_id, "system", "[Agent is busy, message queued]")
+                self.store.add_message(room_id, "system", "[Agent is busy, message queued — use Interrupt to force stop]")
             else:
                 self._run_in_background(room_id, self._do_intervene, room_id, target, message)
 
@@ -281,13 +340,10 @@ class Router:
         room = self.store.get_room(room_id)
         if not room:
             raise ValueError(f"Room not found: {room_id}")
-        if self.is_busy(room_id):
-            return self._room_snapshot(room_id)
 
         self.store.add_message(room_id, "user", task)
         self.store.update_room_state(room_id, "working")
 
-        # 发给executor：用户的任务 + trigger_execute模版
         self._run_in_background(room_id, self._do_assign_task, room_id, task)
         return self._room_snapshot(room_id)
 
@@ -314,9 +370,31 @@ class Router:
         self.store.update_message(msg_id, result.output_text or "\n".join(chunks) or "[No response]")
 
         # 如果是auto mode，继续触发reviewer
-        if self._auto_mode.get(room_id, False):
+        with self._get_lock(room_id):
+            is_auto = self._auto_mode.get(room_id, False)
+        if is_auto:
             self._do_round(room_id, "reviewer")
             self._auto_loop(room_id)
+
+    def _start_auto_thread(self, room_id: str) -> None:
+        """启动 auto-loop 后台线程（内部方法）。"""
+        lock = self._get_lock(room_id)
+        with lock:
+            if self._busy.get(room_id, False):
+                return
+            self._busy[room_id] = True
+
+        def _auto_wrapper():
+            try:
+                self._auto_loop(room_id)
+            except Exception as exc:
+                traceback.print_exc()
+                self.store.add_message(room_id, "system", f"[Auto Error] {exc}")
+            finally:
+                with lock:
+                    self._busy[room_id] = False
+
+        threading.Thread(target=_auto_wrapper, daemon=True).start()
 
     def start_auto(self, room_id: str) -> dict:
         """开启Full-Auto模式。"""
@@ -324,23 +402,63 @@ class Router:
         if not room:
             raise ValueError(f"Room not found: {room_id}")
 
-        self._auto_mode[room_id] = True
+        self._auto_paused.discard(room_id)
+        with self._get_lock(room_id):
+            self._auto_mode[room_id] = True
         self.store.add_message(room_id, "system", "[Full-Auto mode ON — click Pause to stop]")
 
         if not self.is_busy(room_id):
-            self._run_in_background(room_id, self._auto_loop, room_id)
+            self._start_auto_thread(room_id)
 
         return self._room_snapshot(room_id)
 
     def stop_auto(self, room_id: str) -> dict:
         """停止Full-Auto模式。"""
-        self._auto_mode[room_id] = False
+        self._auto_paused.discard(room_id)
+        with self._get_lock(room_id):
+            self._auto_mode[room_id] = False
         self.store.add_message(room_id, "system", "[Full-Auto mode OFF — paused]")
+        return self._room_snapshot(room_id)
+
+    def interrupt(self, room_id: str) -> dict:
+        """用户打断：强制终止当前运行的agent，清除所有状态。"""
+        # 标记中断，让后台线程在检查点停下
+        self._interrupted.add(room_id)
+        # 停止 auto mode
+        with self._get_lock(room_id):
+            self._auto_mode[room_id] = False
+            self._busy[room_id] = False
+
+        # Kill 所有活跃进程
+        sessions = self.store.get_sessions_for_room(room_id)
+        for s in sessions:
+            self.session_mgr.kill_active(s["session_id"])
+
+        self.store.add_message(room_id, "system", "[User interrupted — all agents stopped]")
         return self._room_snapshot(room_id)
 
     def _auto_loop(self, room_id: str) -> None:
         """全自动循环：executor → reviewer → executor → ... 直到用户暂停。"""
-        while self._auto_mode.get(room_id, False):
+        fail_count = 0
+        round_count = 0
+
+        while True:
+            # 检查是否应该继续
+            with self._get_lock(room_id):
+                if not self._auto_mode.get(room_id, False):
+                    break
+            if self._check_interrupted(room_id):
+                break
+
+            if round_count >= self.MAX_AUTO_ROUNDS:
+                self.store.add_message(
+                    room_id, "system",
+                    f"[Auto stopped: reached max {self.MAX_AUTO_ROUNDS} rounds]",
+                )
+                with self._get_lock(room_id):
+                    self._auto_mode[room_id] = False
+                break
+
             # 判断轮到谁
             last = self.store.get_latest_message(room_id)
             if not last or last["sender"] in ("system", "user", "reviewer"):
@@ -348,10 +466,54 @@ class Router:
             else:
                 turn = "reviewer"
 
-            self._do_round(room_id, turn)
+            try:
+                success = self._do_round(room_id, turn)
 
-            if not self._auto_mode.get(room_id, False):
+                # 失败时重试同一轮，最多 MAX_ROUND_RETRIES 次
+                if not success:
+                    for retry in range(1, self.MAX_ROUND_RETRIES + 1):
+                        self.store.add_message(
+                            room_id, "system",
+                            f"[Retry {retry}/{self.MAX_ROUND_RETRIES} for {turn}...]",
+                        )
+                        time.sleep(self.AUTO_ROUND_INTERVAL)
+                        with self._get_lock(room_id):
+                            if not self._auto_mode.get(room_id, False):
+                                break
+                        success = self._do_round(room_id, turn)
+                        if success:
+                            break
+
+                if success:
+                    fail_count = 0
+                    round_count += 1
+                else:
+                    fail_count += 1
+                    self.store.add_message(
+                        room_id, "system",
+                        f"[{turn} failed after {self.MAX_ROUND_RETRIES} retries]",
+                    )
+
+            except Exception as exc:
+                traceback.print_exc()
+                fail_count += 1
+                self.store.add_message(room_id, "system", f"[Auto round failed: {exc}]")
+
+            if fail_count >= self.MAX_AUTO_FAILURES:
+                self.store.add_message(
+                    room_id, "system",
+                    f"[Auto paused: {self.MAX_AUTO_FAILURES} consecutive failures — send any message to resume]",
+                )
+                with self._get_lock(room_id):
+                    self._auto_mode[room_id] = False
+                self._auto_paused.add(room_id)
                 break
+
+            # 再次检查 + 轮间间隔
+            with self._get_lock(room_id):
+                if not self._auto_mode.get(room_id, False):
+                    break
+            time.sleep(self.AUTO_ROUND_INTERVAL)
 
     def _do_intervene(self, room_id: str, target: Turn, message: str) -> None:
         """用户干预的后台执行。"""
@@ -379,11 +541,15 @@ class Router:
             for f in mailbox_dir.glob("*.txt"):
                 mailbox_files[f.name] = f.read_text(encoding="utf-8")
 
+        with self._get_lock(room_id):
+            busy = self._busy.get(room_id, False)
+            auto_mode = self._auto_mode.get(room_id, False)
+
         return {
             "room": room,
             "messages": messages,
             "sessions": sessions,
             "mailbox_files": mailbox_files,
-            "busy": self.is_busy(room_id),
-            "auto_mode": self._auto_mode.get(room_id, False),
+            "busy": busy,
+            "auto_mode": auto_mode,
         }

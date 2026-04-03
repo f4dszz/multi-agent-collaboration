@@ -132,6 +132,11 @@ class Handler(BaseHTTPRequestHandler):
                     snapshot = router.stop_auto(room_id)
                 self._json_response(snapshot)
 
+            elif (m := re.match(r"^/api/rooms/([^/]+)/interrupt$", path)):
+                room_id = m.group(1)
+                snapshot = router.interrupt(room_id)
+                self._json_response(snapshot)
+
             elif (m := re.match(r"^/api/rooms/([^/]+)/approve$", path)):
                 room_id = m.group(1)
                 decision = body.get("decision", "approve")
@@ -190,6 +195,8 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         if length == 0:
             return {}
+        if length > 1_000_000:  # 1MB 限制
+            raise ValueError("Request body too large")
         raw = self.rfile.read(length).decode("utf-8", errors="replace")
         return json.loads(raw)
 
@@ -199,7 +206,11 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
 
     def _serve_static(self, rel_path: str) -> None:
-        file_path = FRONTEND_DIR / rel_path
+        file_path = (FRONTEND_DIR / rel_path).resolve()
+        # 防止路径遍历
+        if not file_path.is_relative_to(FRONTEND_DIR.resolve()):
+            self._json_response({"error": "Forbidden"}, status=403)
+            return
         if not file_path.is_file():
             self._json_response({"error": "Not found"}, status=404)
             return
@@ -232,8 +243,11 @@ def main() -> None:
         server.serve_forever()
     except KeyboardInterrupt:
         print("\nShutting down...")
+        print("Cleaning up active processes...")
+        session_mgr.cleanup_all()
         server.shutdown()
         store.close()
+        print("Done.")
 
 
 if __name__ == "__main__":

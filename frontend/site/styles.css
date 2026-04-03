@@ -252,6 +252,8 @@ body {
 .action-btn.primary { background: var(--accent); color: #000; font-weight: 600; }
 .action-btn.approve { background: var(--approve); color: #000; }
 .action-btn.reject { background: var(--reject); color: #fff; }
+.action-btn.interrupt { background: #ff5722; color: #fff; font-weight: 600; }
+.action-btn.interrupt:not(:disabled):hover { background: #e64a19; }
 
 .action-btn.auto { background: #7c4dff; color: #fff; }
 .action-btn.pause { background: #ff9800; color: #000; animation: pulse-btn 1.5s ease-in-out infinite; }

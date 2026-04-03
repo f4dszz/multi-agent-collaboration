@@ -231,18 +231,12 @@ function renderMailbox(files) {
     return;
   }
 
-  // Save current open/closed state before re-render
-  el.querySelectorAll("details.mailbox-file").forEach((d) => {
-    const name = d.querySelector("summary")?.textContent;
-    if (name) state.mailboxState[name] = d.open;
-  });
-
-  el.innerHTML = names
+  // Build new content and compare with existing to avoid unnecessary DOM thrash
+  const newHtml = names
     .map((name) => {
-      // Preserve user's open/closed choice; default to closed after first render
       const isOpen = state.mailboxState[name] !== undefined
         ? state.mailboxState[name]
-        : Object.keys(state.mailboxState).length === 0; // first render: open
+        : Object.keys(state.mailboxState).length === 0;
       return `
     <details class="mailbox-file" ${isOpen ? "open" : ""}>
       <summary>${esc(name)}</summary>
@@ -250,6 +244,24 @@ function renderMailbox(files) {
     </details>`;
     })
     .join("");
+
+  // Skip re-render if content hasn't changed (preserves scroll position)
+  if (el._lastHtml === newHtml) return;
+  el._lastHtml = newHtml;
+
+  // Save current open/closed state before re-render
+  el.querySelectorAll("details.mailbox-file").forEach((d) => {
+    const name = d.querySelector("summary")?.textContent;
+    if (name) state.mailboxState[name] = d.open;
+  });
+
+  // Save and restore scroll position of the right panel
+  const panel = el.closest(".panel");
+  const scrollPos = panel ? panel.scrollTop : 0;
+
+  el.innerHTML = newHtml;
+
+  if (panel) panel.scrollTop = scrollPos;
 
   // Listen for toggle events to track state
   el.querySelectorAll("details.mailbox-file").forEach((d) => {
@@ -266,6 +278,7 @@ function updateActions(roomState, busy, autoMode) {
   const autoBtn = document.getElementById("btn-auto");
   const approve = document.getElementById("btn-approve");
   const reject = document.getElementById("btn-reject");
+  const interrupt = document.getElementById("btn-interrupt");
   const taskBar = document.getElementById("task-bar");
   const interveneBar = document.getElementById("intervene-bar");
 
@@ -282,6 +295,9 @@ function updateActions(roomState, busy, autoMode) {
     autoBtn.classList.remove("pause");
     autoBtn.classList.add("auto");
   }
+
+  // Interrupt: only enabled when busy
+  interrupt.disabled = !busy;
 
   if (busy) {
     onboard.disabled = true;
@@ -367,6 +383,18 @@ async function toggleAuto() {
       action: isAuto ? "stop" : "start",
     });
     renderRoom(data);
+  } catch (err) {
+    showError(err.message);
+  }
+}
+
+async function doInterrupt() {
+  if (!state.selectedRoomId) return;
+  if (!confirm("Force stop all running agents? This will kill active processes.")) return;
+  try {
+    const data = await api("POST", `/api/rooms/${state.selectedRoomId}/interrupt`, {});
+    renderRoom(data);
+    await loadRooms();
   } catch (err) {
     showError(err.message);
   }
