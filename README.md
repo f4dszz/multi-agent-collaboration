@@ -44,30 +44,49 @@ python server.py
 ## 使用流程
 
 ```
-1. 点击 [+] 创建 Room
-   - 填写 Room ID、Workspace（真实存在的项目路径）
+1. 创建 Room
+   - 点击 [+]，填写 Room ID、Workspace（真实存在的项目路径）
    - 选择 Executor/Reviewer 的 Provider（claude 或 codex）
 
-2. 点击 [Onboard]
-   - 系统给双方agent发送角色手册
+2. Onboard
+   - 点击 [Onboard]，系统给双方agent发送角色手册
    - 执行人和监督人分别了解自己的职责
    - 流式输出：可以实时看到agent的思考过程
+   - 中途可安全 Interrupt，不会意外跳到下一个agent
 
-3. 输入任务
+3. 下发任务
    - Onboard完成后弹出任务输入框
    - 输入你想让执行人做的事情，回车发送
-   - 执行人收到任务后开始工作
 
-4. 协作循环
-   - [Next Round]: 手动触发下一轮（executor → reviewer 交替）
-   - [▶ Full-Auto]: 全自动模式，executor ↔ reviewer 持续循环
-   - [⏸ Pause]: 暂停全自动模式
-   - 底部输入框: 直接给指定agent发消息（用户干预）
+4. 协作循环（两种触发方式）
+   a) [Next Round]: 直接触发目标agent读邮箱并工作
+   b) 输入框发消息: agent同样走完整轮次流程，
+      但你的消息会作为[用户补充说明]一并发送
+   → 目标agent自动选对方（执行人刚回复 → 默认选监督人），
+     也可手动切换
 
-5. 审批
+5. Full-Auto 模式
+   - [▶ Full-Auto]: executor ↔ reviewer 全自动循环
+   - 失败自动重试（单轮最多2次），连续3轮失败自动暂停
+   - 用户发任何消息即可恢复
+   - 监督人达成共识时自动暂停，等待用户确认
+
+6. 审批
    - [Approve]: 确认当前阶段完成
    - [Reject]: 驳回，要求继续修改
 ```
+
+## 核心特性
+
+| 特性 | 说明 |
+|------|------|
+| **统一消息发送** | Send = Next Round + 用户消息。agent走完整轮次流程（读邮箱→执行→写邮箱），用户的话作为补充上下文 |
+| **智能 Target** | 自动默认选对方agent（执行人说完→选监督人），可手动覆盖 |
+| **安全中断** | Interrupt 设置协作标志，在检查点优雅停止，不会跳到下一agent |
+| **重试容错** | 失败自动重试2次，连续3轮失败暂停并提示用户 |
+| **共识检测** | Full-Auto模式下，监督人审核通过时自动暂停等待确认 |
+| **流式输出** | agent思考过程实时展示，带打字光标动画 |
+| **Onboard隔离** | agent在onboard阶段不探索工作区，只读自己的手册 |
 
 ## 架构
 
@@ -162,15 +181,9 @@ runtime/rooms/{room_id}/.local_agent_ops/
 │          │  系统: 等待用户操作            │  共识状态    │
 │          │                              │  待决问题    │
 │          │ [Onboard] [Next] [Auto] ...  │  轮次记录    │
-│          │ [任务输入框 / 直接干预输入框]   │             │
+│          │ [消息输入框 → target agent]    │             │
 └──────────┴──────────────────────────────┴─────────────┘
 ```
-
-特性：
-- 消息支持Markdown渲染（标题、加粗、代码块、列表）
-- 流式输出：agent思考过程实时展示，带打字光标动画
-- 邮箱文件展开/折叠状态记忆（轮询刷新不丢失）
-- Full-Auto模式：executor ↔ reviewer自动循环，Pause一键暂停
 
 ## 状态流转
 
@@ -180,8 +193,8 @@ onboarding → awaiting_task → working ⇄ awaiting_approval → completed
                                 └──────────────┘ (用户驳回)
 ```
 
-- **onboarding**: 给双方agent发角色手册
+- **onboarding**: 给双方agent发角色手册（可安全中断）
 - **awaiting_task**: 等用户输入第一个任务
-- **working**: executor/reviewer轮流工作中
-- **awaiting_approval**: 等用户审批
+- **working**: executor/reviewer轮流工作中（支持重试容错）
+- **awaiting_approval**: 等用户审批（共识检测自动触发）
 - **completed**: 全部完成

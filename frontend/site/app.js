@@ -59,6 +59,10 @@ async function init() {
   document.getElementById("intervene-input").addEventListener("keydown", (e) => {
     if (e.key === "Enter") { e.preventDefault(); doIntervene(); }
   });
+  // Track manual target override — reset after each send
+  document.getElementById("intervene-target").addEventListener("change", () => {
+    document.getElementById("intervene-target").dataset.userOverride = "1";
+  });
 }
 
 // --- Rooms ---
@@ -178,6 +182,18 @@ function renderRoom(data, silent) {
   renderMailbox(data.mailbox_files || {});
 
   updateActions(room.state, busy, data.auto_mode || false);
+
+  // Smart default: target the opposite of whoever spoke last
+  const targetEl = document.getElementById("intervene-target");
+  if (targetEl && messages.length > 0) {
+    const lastAgent = [...messages].reverse().find(m => m.sender === "executor" || m.sender === "reviewer");
+    if (lastAgent) {
+      const defaultTarget = lastAgent.sender === "executor" ? "reviewer" : "executor";
+      if (targetEl.value !== defaultTarget && !targetEl.dataset.userOverride) {
+        targetEl.value = defaultTarget;
+      }
+    }
+  }
 
   const indicator = document.getElementById("busy-indicator");
   if (busy) {
@@ -352,6 +368,7 @@ async function doIntervene() {
     const data = await api("POST", `/api/rooms/${state.selectedRoomId}/approve`, { decision: "intervene", message, target });
     renderRoom(data);
     input.value = "";
+    delete document.getElementById("intervene-target").dataset.userOverride;
   } catch (err) {
     showError(err.message);
   }

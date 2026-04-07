@@ -39,6 +39,12 @@ class Router:
         "[Failed", "[Error", "[Timeout",
     )
 
+    # reviewer 输出包含这些关键词时，视为达成共识，auto 暂停等用户审批
+    _CONSENSUS_KEYWORDS = (
+        "无异议", "建议进入下一阶段", "共识达成", "审核通过", "可以进入下一步",
+        "no objection", "approved", "consensus reached", "ready for next phase",
+    )
+
     def __init__(self, store: Store, session_mgr: SessionManager, runtime_root: Path) -> None:
         self.store = store
         self.session_mgr = session_mgr
@@ -70,6 +76,19 @@ class Router:
         if room_id in self._interrupted:
             self._interrupted.discard(room_id)
             return True
+        return False
+
+    def _check_consensus(self, room_id: str, reviewer_output: str) -> bool:
+        """检查是否达成共识：reviewer 关键词 或 共识文件标记。"""
+        lower = reviewer_output.lower()
+        if any(kw in lower for kw in self._CONSENSUS_KEYWORDS):
+            return True
+        # 检查共识状态文件
+        consensus_file = self.runtime_root / "rooms" / room_id / ".local_agent_ops" / "agent_mailbox" / "共识状态.txt"
+        if consensus_file.exists():
+            content = consensus_file.read_text(encoding="utf-8").lower()
+            if any(kw in content for kw in ("共识达成", "全部完成", "consensus reached", "approved")):
+                return True
         return False
 
     def _ensure_session(self, session_row: dict, workspace: str) -> None:
@@ -240,8 +259,10 @@ class Router:
         self._run_in_background(room_id, self._do_round, room_id, turn)
         return self._room_snapshot(room_id)
 
-    def _do_round(self, room_id: str, turn: Turn) -> bool:
-        """实际执行一轮（在后台线程中运行）。返回 True 表示成功。"""
+    def _do_round(self, room_id: str, turn: Turn, user_note: str = "") -> tuple[bool, str]:
+        """实际执行一轮（在后台线程中运行）。返回 (success, output_text)。
+        user_note: 用户附加说明，会追加到模板末尾一并发送给 agent。
+        """
         room = self.store.get_room(room_id)
         room_dir = self.runtime_root / "rooms" / room_id
         executor_role = room["executor_role"]
@@ -264,6 +285,9 @@ class Router:
         ctx = templates.get_room_context(room_dir, role, other_role, room["workspace"])
         message = templates.render(template_name, **ctx)
 
+        if user_note:
+            message += f"\n\n[用户补充说明]\n{user_note}"
+
         self.store.add_message(room_id, "system", f"[Triggering {role}...]")
         msg_id, chunks, on_chunk = self._make_stream_callback(room_id, turn)
         result = self.session_mgr.send_message(
@@ -274,10 +298,10 @@ class Router:
 
         # 判定是否成功
         if not result.success:
-            return False
+            return (False, output)
         if any(output.startswith(m) or output == m for m in self._ERROR_MARKERS):
-            return False
-        return True
+            return (False, output)
+        return (True, output)
 
     def approve(self, room_id: str, comment: str = "") -> dict:
         """用户审批：确认进入下一阶段。"""
@@ -310,7 +334,7 @@ class Router:
         return self._room_snapshot(room_id)
 
     def user_message(self, room_id: str, message: str, target: Turn | None = None) -> dict:
-        """用户直接干预：发消息给特定agent或广播。"""
+        """用户直接干预：发消息给特定agent。"""
         room = self.store.get_room(room_id)
         if not room:
             raise ValueError(f"Room not found: {room_id}")
@@ -331,7 +355,7 @@ class Router:
             if self.is_busy(room_id):
                 self.store.add_message(room_id, "system", "[Agent is busy, message queued — use Interrupt to force stop]")
             else:
-                self._run_in_background(room_id, self._do_intervene, room_id, target, message)
+                self._run_in_background(room_id, self._do_round, room_id, target, message)
 
         return self._room_snapshot(room_id)
 
@@ -467,7 +491,7 @@ class Router:
                 turn = "reviewer"
 
             try:
-                success = self._do_round(room_id, turn)
+                success, output = self._do_round(room_id, turn)
 
                 # 失败时重试同一轮，最多 MAX_ROUND_RETRIES 次
                 if not success:
@@ -480,13 +504,24 @@ class Router:
                         with self._get_lock(room_id):
                             if not self._auto_mode.get(room_id, False):
                                 break
-                        success = self._do_round(room_id, turn)
+                        success, output = self._do_round(room_id, turn)
                         if success:
                             break
 
                 if success:
                     fail_count = 0
                     round_count += 1
+
+                    # reviewer 完成后检查是否达成共识
+                    if turn == "reviewer" and self._check_consensus(room_id, output):
+                        self.store.add_message(
+                            room_id, "system",
+                            "[Consensus detected — auto paused, awaiting user approval]",
+                        )
+                        self.store.update_room_state(room_id, "awaiting_approval")
+                        with self._get_lock(room_id):
+                            self._auto_mode[room_id] = False
+                        break
                 else:
                     fail_count += 1
                     self.store.add_message(
