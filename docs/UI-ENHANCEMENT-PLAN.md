@@ -4,138 +4,173 @@
 
 [Star-Office-UI](https://github.com/ringhyacinth/Star-Office-UI) — 像素风 AI 办公室看板，将 agent 工作状态映射到像素角色在房间中的位置和动画。
 
+## Star-Office 技术拆解
+
+通过阅读源码，确认其核心技术栈：
+
+| 组件 | 技术 | 细节 |
+|------|------|------|
+| 游戏引擎 | **Phaser.js 3** | `Phaser.AUTO`（WebGL优先，Canvas降级），`pixelArt: true` |
+| 渲染画布 | 1280×720 Canvas | 嵌入 `#game-container` div |
+| 布局管理 | `layout.js` | 所有坐标、depth、缩放集中配置，避免 magic number |
+| 场景逻辑 | `game.js` | preload→create→update 三段式，状态驱动角色移动 |
+| 精灵动画 | Spritesheet 网格切帧 | 如 star_working: 230×144px/帧，192帧，12fps |
+| 状态映射 | 6种状态 → 3个区域 | idle→休息区, writing/executing→工位, error→bug区 |
+| 气泡系统 | Phaser Graphics + Text | 打字机效果，随机文案轮播，8秒间隔 |
+| 交互 | 点击家具换帧 | 植物/海报/猫随机切换精灵帧 |
+| 后端轮询 | fetch('/status') | 每2秒拉取状态，驱动角色切换 |
+| 素材格式 | WebP优先 + PNG降级 | 透明素材强制PNG，运行时检测浏览器WebP支持 |
+
 ## 目标
 
 在**不改变任何后端逻辑和功能**的前提下，将当前深色终端风前端改造为像素风办公室主题：
 - 两个 agent 拟人化为像素角色（执行人 + 监督人）
 - 办公室场景作为背景，agent 状态映射到不同区域/动画
 - 保留全部功能：Room 管理、聊天流、邮箱查看、操作按钮
+- 像素场景作为顶部装饰层，业务面板仍是DOM元素
 
 ## 技术选型
 
 | 方向 | 选择 | 理由 |
 |------|------|------|
-| 渲染方式 | **CSS Sprites + DOM** | 保持轻量，不引入游戏引擎，与现有 vanilla JS 一致 |
-| 像素字体 | Web font（如 [Press Start 2P](https://fonts.google.com/specimen/Press+Start+2P) 或中文像素字体） | 标题和按钮用像素字体，正文保留可读字体 |
-| 精灵图 | 自制或使用开源像素素材（遵守许可证） | LimeZu 等免费素材，角色需 4 方向 + idle/walk/work 帧 |
-| 动画 | CSS `@keyframes` + `steps()` | 逐帧动画，原生支持，零依赖 |
-| 布局 | 保持三栏结构，外层包裹像素办公室场景 | 功能区域不变，只是视觉包装 |
+| 游戏引擎 | **Phaser.js 3**（CDN引入） | 与 Star-Office 一致，成熟的2D精灵/动画/物理引擎 |
+| 素材生成 | **AI 生图**（Midjourney/DALL-E/本地SD）| 自定义双角色 + 办公室背景，避免版权问题 |
+| 像素字体 | Press Start 2P（Google Fonts）+ 方正像素字体 | 标题/按钮用像素字体，正文保留可读字体 |
+| 布局 | 借鉴 layout.js 模式 | 坐标/depth 集中管理，与 Star-Office 结构一致 |
+| 集成方式 | Phaser Canvas 嵌入顶部 + 下方 DOM 面板 | 场景是纯装饰，不承载业务逻辑 |
 
-## 整体布局方案
+## 页面布局方案
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  ░░ 像素办公室场景（顶部横幅 / 全屏背景）░░                     │
-│  ┌─────────┐  ┌──────────────────┐  ┌─────────────────┐     │
-│  │ 执行人   │  │    监督人          │  │                 │     │
-│  │ 🧑‍💻      │  │    👩‍⚖️            │  │   公告栏         │     │
-│  │ [工位区]  │  │    [审核区]        │  │   (邮箱文件)     │     │
-│  └─────────┘  └──────────────────┘  └─────────────────┘     │
-│                                                              │
-│  ┌──────────────────────────────────────────────────────┐    │
-│  │  💬 聊天消息流（像素风气泡样式）                         │    │
-│  │  ┌─ EXECUTOR ──────────────────────────────────┐     │    │
-│  │  │  [像素头像] 我已完成代码修改...                │     │    │
-│  │  └─────────────────────────────────────────────┘     │    │
-│  │  ┌─ REVIEWER ──────────────────────────────────┐     │    │
-│  │  │  [像素头像] 审核通过，有两个小问题...          │     │    │
-│  │  └─────────────────────────────────────────────┘     │    │
-│  └──────────────────────────────────────────────────────┘    │
-│                                                              │
-│  [🎮 操作栏：Onboard | Next | Auto | Approve | Reject ]     │
-│  [📝 消息输入框 → target selector → Send]                    │
-└─────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│  ┌────────────────────────────────────────────────────┐  │
+│  │         Phaser Canvas（像素办公室场景）               │  │
+│  │                                                    │  │
+│  │   [执行人角色]        [监督人角色]                    │  │
+│  │   💻 工位区           📋 审核区                      │  │
+│  │         [咖啡机] [植物] [猫]                         │  │
+│  │                                                    │  │
+│  │   状态气泡: "正在编码..."   "等待审核..."              │  │
+│  └────────────────────────────────────────────────────┘  │
+│                                                          │
+│  ┌──────────┬─────────────────────────┬──────────────┐  │
+│  │ Room列表  │   聊天消息流（像素风气泡） │  邮箱文件     │  │
+│  │          │                         │  查看器       │  │
+│  │ [Room 1] │  [像素头像] EXECUTOR:    │              │  │
+│  │ [Room 2] │  我已完成修改...         │  执行人邮箱   │  │
+│  │          │  [像素头像] REVIEWER:    │  监督人邮箱   │  │
+│  │          │  审核通过...            │  共识状态     │  │
+│  │          │                         │              │  │
+│  │          │ [操作栏] [消息输入]      │              │  │
+│  └──────────┴─────────────────────────┴──────────────┘  │
+└──────────────────────────────────────────────────────────┘
 ```
 
 ## Agent 拟人化设计
 
 ### 角色设定
 
-| Agent | 像素角色 | 工位区域 | 状态动画 |
+| Agent | 像素角色 | 工位区域 | 精灵状态 |
 |-------|---------|---------|---------|
-| **执行人** | 程序员角色（戴耳机/帽衫） | 左侧电脑桌 | idle→坐着喝咖啡, working→打字, error→头上冒烟 |
-| **监督人** | 审查官角色（眼镜/正装） | 右侧审核桌 | idle→看报纸, working→翻文件, approved→竖拇指 |
+| **执行人** | 程序员（戴耳机/帽衫） | 左侧电脑桌 | idle: 坐着喝咖啡, working: 打字+屏幕闪, error: 头上冒烟 |
+| **监督人** | 审查官（眼镜/正装） | 右侧审核桌 | idle: 看报纸, working: 翻文件, approved: 竖拇指 |
 
-### 状态 → 动画映射
+### 状态 → 场景映射（借鉴 Star-Office STATES 模式）
 
-| Room 状态 | 执行人动画 | 监督人动画 | 场景效果 |
-|-----------|-----------|-----------|---------|
-| `onboarding` | 走向工位坐下 | 走向工位坐下 | 灯渐亮 |
-| `awaiting_task` | 坐着等待（idle） | 看报纸 | 平静 |
-| `working` (executor busy) | 快速打字 + 屏幕闪烁 | idle | 执行人桌上台灯亮 |
-| `working` (reviewer busy) | idle | 翻文件审核 | 监督人桌上台灯亮 |
-| `awaiting_approval` | 站起来看向用户 | 站起来看向用户 | 两盏灯都亮 |
-| `completed` | 起身庆祝 | 起身庆祝 | 撒花/彩带 |
+```javascript
+const AGENT_STATES = {
+  onboarding:        { executor: 'walking_to_desk', reviewer: 'walking_to_desk' },
+  awaiting_task:     { executor: 'idle_coffee',     reviewer: 'idle_newspaper' },
+  working_executor:  { executor: 'typing',          reviewer: 'idle' },
+  working_reviewer:  { executor: 'idle',            reviewer: 'reviewing' },
+  awaiting_approval: { executor: 'standing',        reviewer: 'standing' },
+  completed:         { executor: 'celebrate',       reviewer: 'celebrate' },
+};
+```
 
-## 视觉元素清单
+## 素材需求清单（AI 生图）
 
-### 必需素材
+### 必需素材（优先级 P0）
+
+| 素材 | 规格 | Prompt 方向 |
+|------|------|------------|
+| 办公室背景 | 1280×400px | "pixel art cozy office room, two desks, warm lighting, side view, 32-bit style" |
+| 执行人-idle | 128×128 spritesheet, 6帧 | "pixel art character sitting at desk, drinking coffee, programmer hoodie, 6 frame animation strip" |
+| 执行人-typing | 230×144 spritesheet, 12帧 | "pixel art programmer typing at computer, screen glowing, 12 frame animation" |
+| 监督人-idle | 128×128 spritesheet, 6帧 | "pixel art character reading newspaper, glasses, formal shirt, 6 frame animation" |
+| 监督人-reviewing | 230×144 spritesheet, 12帧 | "pixel art inspector reviewing documents, writing notes, 12 frame animation" |
+| 办公桌×2 | 各 200×150px（透明PNG）| "pixel art office desk with computer, side view, transparent background" |
+
+### 装饰素材（P1）
 
 | 素材 | 规格 | 说明 |
 |------|------|------|
-| 办公室背景 | 960×320px 像素画 | 两个工位 + 中间区域，深色木质风 |
-| 执行人精灵图 | 32×32px × 6帧 × 4状态 | idle, typing, error, celebrate |
-| 监督人精灵图 | 32×32px × 6帧 × 4状态 | idle, reviewing, thumbsup, celebrate |
-| 对话气泡 | 9-patch 像素边框 | 可拉伸的像素风气泡 |
-| 按钮样式 | 像素风凸起按钮 | hover 时下压效果 |
-| 图标集 | 16×16px | 邮箱、文件、咖啡、灯泡等 |
-| 状态气泡 | 小型浮动文字 | agent 头上显示当前状态 |
+| 咖啡机 | 230×230 spritesheet | 冒烟动画 |
+| 植物盆栽 | 160×160 多帧 | 随机品种 |
+| 猫 | 160×160 多帧 | 桌面装饰，可点击 |
+| 公告板 | 200×300px | 邮箱文件区域的视觉映射 |
 
-### 可选装饰
+### 可用开源素材备选
 
-- 桌面物品：咖啡杯、植物、猫（Star-Office 风格）
-- 窗户/时钟（可跟随真实时间）
-- 背景音效切换（可选，默认关闭）
+- [LimeZu - Modern Interiors](https://limezu.itch.io/moderninteriors)（免费，适合办公室家具）
+- [LimeZu - Animated Characters](https://limezu.itch.io/animated-mini-characters-2-platform-free)（免费，角色动画）
+- 注意：部分素材仅限非商用
 
 ## 实施步骤
 
-### Phase 1: 基础像素化（样式层）
-1. **引入像素字体** — 标题/按钮用 Press Start 2P，正文保留 system font
-2. **配色方案** — 从深色终端色切换到像素办公室暖色调
-3. **按钮像素化** — 所有按钮改为像素风凸起样式（box-shadow 模拟）
-4. **消息气泡** — 用 CSS border-image 或 box-shadow 做像素边框
-5. **输入框** — 像素风内嵌样式
+### Phase 1: 基础搭建
+1. **引入 Phaser.js** — CDN 方式加载到 index.html
+2. **创建 `office-layout.js`** — 借鉴 Star-Office 的 layout.js，定义双工位坐标
+3. **创建 `office-scene.js`** — preload/create/update 三段式，初始化空场景
+4. **占位素材** — 用纯色矩形占位，验证布局和深度层级
+5. **集成到页面** — Canvas 放在业务面板上方
 
-### Phase 2: 办公室场景
-6. **制作/获取背景图** — 像素办公室静态背景
-7. **场景容器** — 顶部添加办公室场景 div，固定高度
-8. **角色精灵图** — 制作或获取两个角色的精灵表
-9. **CSS 动画** — `@keyframes` + `animation-timing-function: steps(N)` 逐帧播放
-10. **状态联动** — JS 根据 room state 和 busy 状态切换角色 CSS class
+### Phase 2: 素材与动画
+6. **生成/制作素材** — AI 生图 → 裁切为 spritesheet 网格
+7. **角色精灵** — 加载 spritesheet，创建逐帧动画（`steps()` 式）
+8. **家具与装饰** — 办公桌、咖啡机、植物、猫
+9. **背景渲染** — 加载像素办公室背景图
 
-### Phase 3: 交互增强
-11. **角色状态气泡** — agent 头上显示"正在编码..."/"正在审核..."
-12. **场景灯光效果** — CSS filter/opacity 模拟灯光开关
-13. **过渡动画** — 状态切换时角色走动动画
-14. **邮箱面板** — 改为像素风公告栏/文件柜样式
-15. **Room 列表** — 改为像素风文件夹/抽屉样式
+### Phase 3: 状态联动
+10. **桥接 app.js ↔ office-scene.js** — 暴露 `updateOfficeState(roomState, busyAgent)` 方法
+11. **角色移动** — 状态切换时角色走向对应区域（Phaser physics 或 tween）
+12. **气泡系统** — Phaser Graphics 绘制像素气泡 + 打字机效果
+13. **Agent 关联** — executor/reviewer 状态分别驱动各自角色
 
-### Phase 4: 打磨
-16. **响应式适配** — 移动端场景缩放
-17. **暗色/亮色切换** — 日间办公室 / 夜间办公室
-18. **性能优化** — 精灵图合并、懒加载
-19. **文档更新** — README 截图更新
+### Phase 4: UI 像素化
+14. **像素字体** — 引入 Press Start 2P，应用到标题和按钮
+15. **配色方案** — 暖色像素办公室调色板替代深色终端风
+16. **按钮样式** — 像素风凸起按钮（box-shadow 模拟 3D 边框）
+17. **消息气泡** — 像素风边框 + 角色头像
+
+### Phase 5: 打磨
+18. **交互细节** — 点击家具换帧、猫的气泡
+19. **加载进度条** — 仿 Star-Office 的像素进度条
+20. **响应式** — 移动端场景缩放
+21. **性能** — WebP 优先 + PNG 降级，懒加载
 
 ## 文件变更范围
 
 ```
 frontend/site/
-├── index.html          # 添加场景容器 div，引入字体
-├── styles.css          # 全面重写视觉样式（保留布局结构）
-├── app.js              # 添加状态→动画映射逻辑（~30行）
-└── assets/             # 新增目录
-    ├── sprites/        # 角色精灵表 PNG
-    ├── backgrounds/    # 办公室背景图
-    ├── ui/             # 像素按钮、气泡边框等 UI 素材
-    └── fonts/          # 像素字体（如果不用 CDN）
+├── index.html              # 添加 Phaser CDN + game-container div
+├── styles.css              # 像素风配色 + 按钮样式 + 字体
+├── app.js                  # 添加 updateOfficeState() 桥接调用（~20行）
+├── office-layout.js        # 新增：坐标/depth/素材配置（借鉴 layout.js）
+├── office-scene.js         # 新增：Phaser 场景逻辑（借鉴 game.js）
+└── assets/                 # 新增目录
+    ├── sprites/            # 角色 spritesheet PNG/WebP
+    ├── backgrounds/        # 办公室背景图
+    ├── furniture/          # 家具素材
+    └── fonts/              # 像素字体（如不用 CDN）
 ```
 
 **不涉及的文件**：backend/\*、templates/\*、tests/\*
 
 ## 风险与注意事项
 
-1. **素材版权** — Star-Office-UI 的美术素材禁止商用，需要自制或用其他开源素材
-2. **中文像素字体** — 像素字体对中文支持有限，正文建议保留普通字体
-3. **性能** — 精灵动画在低端设备上需注意帧率，用 `will-change` 和 GPU 加速
-4. **可读性** — 像素风不能牺牲功能可读性，消息内容区保持清晰字体
-5. **渐进增强** — 即使精灵图加载失败，功能面板仍可正常使用
+1. **Phaser.js 体积** — CDN 引入约 500KB gzip，首次加载增加约 1 秒
+2. **素材质量** — AI 生成的 spritesheet 帧一致性是挑战，可能需手动微调
+3. **中文像素字体** — 正文保留系统字体，仅标题/按钮用像素字体
+4. **降级方案** — Phaser 加载失败时，业务面板仍可正常使用（独立 DOM）
+5. **素材版权** — AI 生成素材归自有，开源素材需遵守许可（LimeZu: 非商用）
