@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Codex - Multi-Agent Orchestrator</title>
   <link rel="stylesheet" href="styles.css">
+  <script src="https://cdn.jsdelivr.net/npm/phaser@3.80.1/dist/phaser.min.js"></script>
 </head>
 <body>
   <div id="app">
@@ -23,6 +24,7 @@
         <span id="room-title">Select a room</span>
         <span id="room-state" class="badge"></span>
       </div>
+      <div id="game-container"></div>
       <div id="chat-messages"></div>
       <div id="chat-actions">
         <div id="action-buttons">
@@ -78,6 +80,7 @@
     </form>
   </dialog>
 
+  <script src="game.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

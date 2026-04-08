@@ -48,6 +48,7 @@ async function init() {
   };
 
   await loadRooms();
+  if (typeof initGame === "function") initGame();
   state.polling = setInterval(() => {
     if (state.selectedRoomId) loadRoom(state.selectedRoomId, true);
   }, 3000);
@@ -182,6 +183,9 @@ function renderRoom(data, silent) {
   renderMailbox(data.mailbox_files || {});
 
   updateActions(room.state, busy, data.auto_mode || false);
+
+  // Update Phaser agent sprites
+  if (typeof updateAgentStates === "function") updateAgentStates(data);
 
   // Smart default: target the opposite of whoever spoke last
   const targetEl = document.getElementById("intervene-target");
