@@ -11,9 +11,11 @@ POST /api/rooms/{id}/approve → 用户审批/驳回/干预
 from __future__ import annotations
 
 import json
+import logging
 import re
 import traceback
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
@@ -231,23 +233,57 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def log_message(self, fmt, *args) -> None:
-        print(f"[{self.log_date_time_string()}] {fmt % args}")
+        logger = logging.getLogger("server.http")
+        logger.info(fmt % args)
+
+
+def _setup_logging(runtime_root: Path) -> None:
+    """配置日志：console + 文件轮转。"""
+    log_dir = runtime_root / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    root = logging.getLogger()
+    root.setLevel(logging.DEBUG)
+
+    fmt = logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    # Console: INFO+
+    ch = logging.StreamHandler()
+    ch.setLevel(logging.INFO)
+    ch.setFormatter(fmt)
+    root.addHandler(ch)
+
+    # File: DEBUG+, 5MB per file, keep 3 backups
+    fh = RotatingFileHandler(
+        log_dir / "server.log", maxBytes=5 * 1024 * 1024, backupCount=3,
+        encoding="utf-8",
+    )
+    fh.setLevel(logging.DEBUG)
+    fh.setFormatter(fmt)
+    root.addHandler(fh)
 
 
 def main() -> None:
     host, port = "127.0.0.1", 8765
+    _setup_logging(RUNTIME_ROOT)
+    logger = logging.getLogger("server")
+
     server = ThreadingHTTPServer((host, port), Handler)
-    print(f"Server running at http://{host}:{port}")
-    print(f"Runtime root: {RUNTIME_ROOT}")
+    logger.info("Server running at http://%s:%d", host, port)
+    logger.info("Runtime root: %s", RUNTIME_ROOT)
+    logger.info("Log file: %s", RUNTIME_ROOT / "logs" / "server.log")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\nShutting down...")
-        print("Cleaning up active processes...")
+        logger.info("Shutting down...")
+        logger.info("Cleaning up active processes...")
         session_mgr.cleanup_all()
         server.shutdown()
         store.close()
-        print("Done.")
+        logger.info("Done.")
 
 
 if __name__ == "__main__":

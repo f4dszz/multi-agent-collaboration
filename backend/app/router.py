@@ -9,10 +9,10 @@
 
 from __future__ import annotations
 
+import logging
 import shutil
 import threading
 import time
-import traceback
 from pathlib import Path
 from typing import Literal
 
@@ -23,6 +23,8 @@ from .store import Store
 
 
 Turn = Literal["executor", "reviewer"]
+
+logger = logging.getLogger("router")
 
 
 class Router:
@@ -109,7 +111,7 @@ class Router:
             try:
                 fn(*args)
             except Exception as exc:
-                traceback.print_exc()
+                logger.error("[%s] Background task error: %s", room_id, exc, exc_info=True)
                 self.store.add_message(room_id, "system", f"[Error] {exc}")
             finally:
                 with lock:
@@ -166,6 +168,8 @@ class Router:
         reviewer_provider: Provider = "claude",
     ) -> dict:
         """创建room：脚手架 + 数据库 + 双方session。"""
+        logger.info("Creating room %s (workspace=%s, exec=%s, review=%s)",
+                     room_id, workspace, executor_provider, reviewer_provider)
         room_dir = create_room(
             self.runtime_root, room_id, workspace,
             executor_role, reviewer_role,
@@ -206,6 +210,7 @@ class Router:
 
     def _do_onboard(self, room_id: str) -> None:
         """实际执行onboarding（在后台线程中运行）。"""
+        logger.info("[%s] Starting onboarding", room_id)
         room = self.store.get_room(room_id)
         room_dir = self.runtime_root / "rooms" / room_id
         executor_role = room["executor_role"]
@@ -249,6 +254,7 @@ class Router:
 
         self.store.update_room_state(room_id, "awaiting_task")
         self.store.add_message(room_id, "system", "Onboarding complete. Please assign a task.")
+        logger.info("[%s] Onboarding complete", room_id)
 
     def run_round(self, room_id: str, turn: Turn) -> dict:
         """执行一轮：后台线程发模版给指定角色。立即返回。"""
@@ -263,6 +269,8 @@ class Router:
         """实际执行一轮（在后台线程中运行）。返回 (success, output_text)。
         user_note: 用户附加说明，会追加到模板末尾一并发送给 agent。
         """
+        logger.info("[%s] Starting round: %s%s", room_id, turn,
+                     " (with user note)" if user_note else "")
         room = self.store.get_room(room_id)
         room_dir = self.runtime_root / "rooms" / room_id
         executor_role = room["executor_role"]
@@ -298,9 +306,12 @@ class Router:
 
         # 判定是否成功
         if not result.success:
+            logger.warning("[%s] Round %s failed (result.success=False)", room_id, turn)
             return (False, output)
         if any(output.startswith(m) or output == m for m in self._ERROR_MARKERS):
+            logger.warning("[%s] Round %s failed (error marker detected)", room_id, turn)
             return (False, output)
+        logger.info("[%s] Round %s completed (%d chars)", room_id, turn, len(output))
         return (True, output)
 
     def approve(self, room_id: str, comment: str = "") -> dict:
@@ -335,6 +346,7 @@ class Router:
 
     def user_message(self, room_id: str, message: str, target: Turn | None = None) -> dict:
         """用户直接干预：发消息给特定agent。"""
+        logger.info("[%s] User message → %s (%d chars)", room_id, target or "broadcast", len(message))
         room = self.store.get_room(room_id)
         if not room:
             raise ValueError(f"Room not found: {room_id}")
@@ -361,6 +373,7 @@ class Router:
 
     def assign_task(self, room_id: str, task: str) -> dict:
         """用户下发任务给执行人（onboard后的第一步）。"""
+        logger.info("[%s] Task assigned (%d chars)", room_id, len(task))
         room = self.store.get_room(room_id)
         if not room:
             raise ValueError(f"Room not found: {room_id}")
@@ -412,7 +425,7 @@ class Router:
             try:
                 self._auto_loop(room_id)
             except Exception as exc:
-                traceback.print_exc()
+                logger.error("[%s] Auto-loop crashed: %s", room_id, exc, exc_info=True)
                 self.store.add_message(room_id, "system", f"[Auto Error] {exc}")
             finally:
                 with lock:
@@ -422,6 +435,7 @@ class Router:
 
     def start_auto(self, room_id: str) -> dict:
         """开启Full-Auto模式。"""
+        logger.info("[%s] Full-Auto mode ON", room_id)
         room = self.store.get_room(room_id)
         if not room:
             raise ValueError(f"Room not found: {room_id}")
@@ -438,6 +452,7 @@ class Router:
 
     def stop_auto(self, room_id: str) -> dict:
         """停止Full-Auto模式。"""
+        logger.info("[%s] Full-Auto mode OFF", room_id)
         self._auto_paused.discard(room_id)
         with self._get_lock(room_id):
             self._auto_mode[room_id] = False
@@ -446,6 +461,7 @@ class Router:
 
     def interrupt(self, room_id: str) -> dict:
         """用户打断：强制终止当前运行的agent，清除所有状态。"""
+        logger.warning("[%s] User interrupt — killing active agents", room_id)
         # 标记中断，让后台线程在检查点停下
         self._interrupted.add(room_id)
         # 停止 auto mode
@@ -463,6 +479,7 @@ class Router:
 
     def _auto_loop(self, room_id: str) -> None:
         """全自动循环：executor → reviewer → executor → ... 直到用户暂停。"""
+        logger.info("[%s] Auto-loop started", room_id)
         fail_count = 0
         round_count = 0
 
@@ -530,7 +547,7 @@ class Router:
                     )
 
             except Exception as exc:
-                traceback.print_exc()
+                logger.error("[%s] Auto round exception: %s", room_id, exc, exc_info=True)
                 fail_count += 1
                 self.store.add_message(room_id, "system", f"[Auto round failed: {exc}]")
 

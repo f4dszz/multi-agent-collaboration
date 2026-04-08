@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 import subprocess
 import tempfile
@@ -19,6 +20,8 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Literal
+
+logger = logging.getLogger("session_mgr")
 
 
 CLAUDE_CLI_JS = Path.home() / "AppData/Roaming/npm/node_modules/@anthropic-ai/claude-code/cli.js"
@@ -114,6 +117,9 @@ class SessionManager:
         if not session:
             raise ValueError(f"Session not found: {session_id}")
 
+        logger.info("Sending message to %s (%s, round %d, %d chars)",
+                     session_id, session.provider, session.round_count + 1, len(message))
+
         if session.provider == "claude":
             result = self._send_claude(session, message, timeout, on_chunk)
         elif session.provider == "codex":
@@ -123,7 +129,10 @@ class SessionManager:
 
         session.round_count += 1
         if not result.success:
+            logger.warning("Session %s marked dead after failed send", session_id)
             session.alive = False
+        else:
+            logger.debug("Session %s send completed successfully", session_id)
         return result
 
     # --- Process management ---
@@ -134,6 +143,7 @@ class SessionManager:
             proc = self._active_procs.get(session_id)
         if not proc:
             return False
+        logger.warning("Killing active process for session %s (pid=%s)", session_id, proc.pid)
         try:
             proc.kill()
             proc.wait(timeout=10)
@@ -147,6 +157,8 @@ class SessionManager:
         """终止所有活跃子进程（服务关闭时调用）。"""
         with self._procs_lock:
             procs = list(self._active_procs.items())
+        if procs:
+            logger.info("Cleaning up %d active processes", len(procs))
         for sid, proc in procs:
             try:
                 proc.kill()
@@ -165,6 +177,7 @@ class SessionManager:
         """启动CLI子进程，逐行读stdout并用line_parser解析JSONL。
         返回 (returncode, collected_texts, stderr, duration_ms)。
         """
+        logger.debug("Running command: %s (cwd=%s)", " ".join(command[:3]) + "...", cwd)
         started = time.perf_counter()
         collected: list[str] = []
         stderr_buf: list[str] = []
@@ -228,6 +241,9 @@ class SessionManager:
             self._active_procs.pop(session_id, None)
 
         rc = proc.returncode if proc.returncode is not None else -1
+        logger.info("Process finished: rc=%d, %d chunks, %dms", rc, len(collected), duration_ms)
+        if rc != 0 and stderr_buf:
+            logger.debug("Process stderr: %s", "".join(stderr_buf)[:500])
         return (rc, collected, "".join(stderr_buf), duration_ms)
 
     # --- Claude Code ---
