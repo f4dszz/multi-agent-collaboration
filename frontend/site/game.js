@@ -599,8 +599,50 @@
 
     if (st === "completed") { tgt.executor = SUCCESS; tgt.reviewer = SUCCESS; return; }
     if (busy) {
-      if (!last || last === "reviewer") { tgt.executor = WORKING; tgt.reviewer = IDLE; }
-      else { tgt.executor = IDLE; tgt.reviewer = WORKING; }
+      // Detect which agent is active from system "[Triggering ...]" messages
+      var allMsgs = data.messages || [];
+      var activeRole = null;
+      for (var j = allMsgs.length - 1; j >= 0; j--) {
+        if (allMsgs[j].sender === "system") {
+          var sc = allMsgs[j].content || "";
+          if (sc.indexOf("Triggering") !== -1) {
+            // Last "[Triggering <role>...]" tells us who is working NOW
+            // The role in the message is the display name; map to executor/reviewer
+            // by checking which agent's message follows (or doesn't yet)
+            // The system message is posted right before the agent runs,
+            // so if it's the very last system "Triggering" message with no
+            // agent reply after it, that agent is currently working.
+            var hasAgentAfter = false;
+            for (var k = j + 1; k < allMsgs.length; k++) {
+              if (allMsgs[k].sender === "executor" || allMsgs[k].sender === "reviewer") {
+                hasAgentAfter = true; break;
+              }
+            }
+            if (!hasAgentAfter) {
+              // Determine which agent from the Triggering message
+              // "[Triggering 执行人...]" → executor, "[Triggering 监督人...]" → reviewer
+              // Since the sender field of the NEXT message would be the active agent,
+              // we check the content: if it mentions executor-related role → executor
+              // Simpler: check if previous agent messages point to executor or reviewer turn
+              // Backend logic: reviewer/user/system last → executor turn; executor last → reviewer turn
+              var lastAgent = null;
+              for (var m = j - 1; m >= 0; m--) {
+                if (allMsgs[m].sender === "executor" || allMsgs[m].sender === "reviewer") {
+                  lastAgent = allMsgs[m].sender; break;
+                }
+              }
+              activeRole = (!lastAgent || lastAgent === "reviewer") ? "executor" : "reviewer";
+            }
+            break;
+          }
+        }
+      }
+      // Fallback: if no Triggering message found, use last agent message heuristic
+      if (!activeRole) {
+        activeRole = (!last || last === "reviewer") ? "executor" : "reviewer";
+      }
+      tgt.executor = (activeRole === "executor") ? WORKING : IDLE;
+      tgt.reviewer = (activeRole === "reviewer") ? WORKING : IDLE;
       return;
     }
     tgt.executor = IDLE; tgt.reviewer = IDLE;
