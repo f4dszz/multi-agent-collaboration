@@ -302,8 +302,14 @@ function updateActions(roomState, busy, autoMode) {
   const taskBar = document.getElementById("task-bar");
   const interveneBar = document.getElementById("intervene-bar");
 
-  // Task input bar: show only in awaiting_task state
-  taskBar.style.display = roomState === "awaiting_task" ? "flex" : "none";
+  // Task input bar: show for awaiting_task AND completed (start new task)
+  taskBar.style.display = (roomState === "awaiting_task" || roomState === "completed") ? "flex" : "none";
+  const taskInput = document.getElementById("task-input");
+  if (taskInput) {
+    taskInput.placeholder = roomState === "completed"
+      ? "Assign a new task to start another round..."
+      : "Describe the task for executor...";
+  }
 
   // Auto button text
   if (autoMode) {
@@ -328,12 +334,14 @@ function updateActions(roomState, busy, autoMode) {
     return;
   }
 
-  const isWorking = roomState === "working";
+  // Completed / onboarding / awaiting_task: disable all working buttons
+  const isTerminal = roomState === "completed" || roomState === "onboarding" || roomState === "awaiting_task";
   onboard.disabled = roomState !== "onboarding";
-  next.disabled = !isWorking;
-  autoBtn.disabled = roomState === "completed" || roomState === "onboarding" || roomState === "awaiting_task";
-  approve.disabled = roomState === "completed" || roomState === "onboarding" || roomState === "awaiting_task";
-  reject.disabled = roomState === "completed" || roomState === "onboarding" || roomState === "awaiting_task";
+  next.disabled = isTerminal;
+  autoBtn.disabled = isTerminal;
+  // Approve/reject only when awaiting_approval
+  approve.disabled = roomState !== "awaiting_approval";
+  reject.disabled = roomState !== "awaiting_approval";
 }
 
 // --- Actions ---
