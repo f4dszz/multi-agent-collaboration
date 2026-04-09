@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Literal
 
 from . import templates
+from .office_sync import OfficeSyncBridge
 from .scaffolder import create_room
 from .session_mgr import SessionManager, Provider
 from .store import Store
@@ -57,6 +58,7 @@ class Router:
         self._interrupted: set[str] = set()   # 被用户打断的room，后台线程需检查
         self._room_locks: dict[str, threading.Lock] = {}
         self._meta_lock = threading.Lock()  # 保护 _room_locks 字典本身
+        self.office_sync = OfficeSyncBridge(enabled=False)  # disabled by default
         # Codex首轮获取thread_id后回写DB
         session_mgr.set_cli_session_update_callback(
             lambda sid, cli_id: store.update_session_cli_id(sid, cli_id)
@@ -297,6 +299,7 @@ class Router:
             message += f"\n\n[用户补充说明]\n{user_note}"
 
         self.store.add_message(room_id, "system", f"[Triggering {role}...]")
+        self.office_sync.push(turn, "working", f"{role} working...")
         msg_id, chunks, on_chunk = self._make_stream_callback(room_id, turn)
         result = self.session_mgr.send_message(
             session_row["session_id"], message, on_chunk=on_chunk,
@@ -307,11 +310,14 @@ class Router:
         # 判定是否成功
         if not result.success:
             logger.warning("[%s] Round %s failed (result.success=False)", room_id, turn)
+            self.office_sync.push(turn, "alert", "Round failed")
             return (False, output)
         if any(output.startswith(m) or output == m for m in self._ERROR_MARKERS):
             logger.warning("[%s] Round %s failed (error marker detected)", room_id, turn)
+            self.office_sync.push(turn, "alert", "Error detected")
             return (False, output)
         logger.info("[%s] Round %s completed (%d chars)", room_id, turn, len(output))
+        self.office_sync.push(turn, "idle", "Round complete")
         return (True, output)
 
     def approve(self, room_id: str, comment: str = "") -> dict:

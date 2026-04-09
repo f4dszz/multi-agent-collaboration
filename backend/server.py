@@ -158,6 +158,26 @@ class Handler(BaseHTTPRequestHandler):
 
                 self._json_response(snapshot)
 
+            elif path == "/api/office-sync":
+                action = body.get("action", "status")
+                if action == "connect":
+                    url = body.get("url", "http://localhost:19000")
+                    key = body.get("join_key", "ocj_codex_team")
+                    router.office_sync = router.office_sync.__class__(
+                        office_url=url, join_key=key, enabled=True,
+                    )
+                    ok = router.office_sync.start()
+                    self._json_response({
+                        "ok": ok,
+                        **router.office_sync.status(),
+                    })
+                elif action == "disconnect":
+                    router.office_sync.stop()
+                    router.office_sync.enabled = False
+                    self._json_response({"ok": True, "enabled": False})
+                else:
+                    self._json_response(router.office_sync.status())
+
             else:
                 self._json_response({"error": "Not found"}, status=404)
 

@@ -479,6 +479,38 @@ function md(raw) {
   return s;
 }
 
+// --- Star-Office-UI Sync ---
+
+let officeSyncConnected = false;
+
+async function toggleOfficeSync() {
+  const btn = document.getElementById("btn-office-sync");
+  const statusEl = document.getElementById("office-sync-status");
+  try {
+    if (officeSyncConnected) {
+      await api("POST", "/api/office-sync", { action: "disconnect" });
+      officeSyncConnected = false;
+      btn.textContent = "🏢 Star-Office";
+      btn.classList.remove("primary");
+      statusEl.textContent = "Disconnected";
+    } else {
+      const url = prompt("Star-Office URL:", "http://localhost:19000");
+      if (!url) return;
+      const data = await api("POST", "/api/office-sync", { action: "connect", url });
+      officeSyncConnected = data.ok;
+      if (data.ok) {
+        btn.textContent = "🏢 Connected";
+        btn.classList.add("primary");
+        statusEl.textContent = `→ ${url}`;
+      } else {
+        statusEl.textContent = "Failed to connect";
+      }
+    }
+  } catch (err) {
+    statusEl.textContent = "Error: " + err.message;
+  }
+}
+
 function esc(s) {
   const d = document.createElement("div");
   d.textContent = s;
