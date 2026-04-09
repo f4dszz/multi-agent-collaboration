@@ -48,7 +48,6 @@ async function init() {
   };
 
   await loadRooms();
-  if (typeof initGame === "function") initGame();
   state.polling = setInterval(() => {
     if (state.selectedRoomId) loadRoom(state.selectedRoomId, true);
   }, 3000);
@@ -184,8 +183,8 @@ function renderRoom(data, silent) {
 
   updateActions(room.state, busy, data.auto_mode || false);
 
-  // Update Phaser agent sprites
-  if (typeof updateAgentStates === "function") updateAgentStates(data);
+  // Update lightweight agent status badges
+  updateAgentBadges(data);
 
   // Smart default: target the opposite of whoever spoke last
   const targetEl = document.getElementById("intervene-target");
@@ -290,6 +289,33 @@ function renderMailbox(files) {
       if (name) state.mailboxState[name] = d.open;
     });
   });
+}
+
+function updateAgentBadges(data) {
+  const exEl = document.getElementById("status-executor");
+  const rvEl = document.getElementById("status-reviewer");
+  if (!exEl || !rvEl || !data || !data.room) return;
+
+  const busy = data.busy;
+  const st = data.room.state;
+  const msgs = (data.messages || []).filter(m => m.sender === "executor" || m.sender === "reviewer");
+  const last = msgs.length ? msgs[msgs.length - 1].sender : null;
+
+  let exState = "idle", rvState = "idle";
+
+  if (st === "completed") {
+    exState = "done"; rvState = "done";
+  } else if (busy) {
+    if (last === "executor") { exState = "working"; }
+    else if (last === "reviewer") { rvState = "working"; }
+    else { exState = "working"; }
+  }
+
+  const labels = { idle: "idle", working: "working…", done: "✓ done" };
+  exEl.textContent = `⚡ Executor: ${labels[exState]}`;
+  rvEl.textContent = `📋 Reviewer: ${labels[rvState]}`;
+  exEl.classList.toggle("working", exState === "working");
+  rvEl.classList.toggle("working", rvState === "working");
 }
 
 function updateActions(roomState, busy, autoMode) {

@@ -5,7 +5,6 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Codex - Multi-Agent Orchestrator</title>
   <link rel="stylesheet" href="styles.css">
-  <script src="https://cdn.jsdelivr.net/npm/phaser@3.80.1/dist/phaser.min.js"></script>
 </head>
 <body>
   <div id="app">
@@ -27,8 +26,11 @@
       <div id="chat-header">
         <span id="room-title">Select a room</span>
         <span id="room-state" class="badge"></span>
+        <div id="agent-status-bar">
+          <span id="status-executor" class="agent-badge executor">⚡ Executor: idle</span>
+          <span id="status-reviewer" class="agent-badge reviewer">📋 Reviewer: idle</span>
+        </div>
       </div>
-      <div id="game-container"></div>
       <div id="chat-messages"></div>
       <div id="chat-actions">
         <div id="action-buttons">
@@ -84,7 +86,6 @@
     </form>
   </dialog>
 
-  <script src="game.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

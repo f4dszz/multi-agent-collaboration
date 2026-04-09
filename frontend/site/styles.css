@@ -153,25 +153,29 @@ body {
   text-transform: uppercase;
 }
 
-/* Office Scene — Phaser canvas */
-#game-container {
-  flex: 2;
-  min-height: 180px;
-  max-height: 360px;
-  border-bottom: 3px solid;
-  border-color: var(--px-border-dark) var(--px-border-light) var(--px-border-light) var(--px-border-dark);
-  position: relative;
+/* Agent Status Bar — lightweight inline indicators */
+#agent-status-bar {
+  display: flex;
+  gap: 10px;
+  margin-left: auto;
 }
-#game-container canvas {
-  display: block;
-  width: 100% !important;
-  height: 100% !important;
-  image-rendering: pixelated;
+
+.agent-badge {
+  font-family: var(--font-term);
+  font-size: 13px;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  background: rgba(255,255,255,0.03);
 }
+
+.agent-badge.executor { color: var(--executor); border-color: rgba(66,165,245,0.3); }
+.agent-badge.reviewer { color: var(--reviewer); border-color: rgba(255,167,38,0.3); }
+.agent-badge.working { animation: pulse-badge 1s step-end infinite; }
+@keyframes pulse-badge { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
 
 /* Terminal — Message Log */
 #chat-messages {
-  flex: 3;
+  flex: 1;
   overflow-y: auto;
   padding: 10px 14px;
   display: flex;
