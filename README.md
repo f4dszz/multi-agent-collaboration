@@ -1,8 +1,24 @@
-# Codex Project - 轻量多Agent邮箱路由系统
+# Codex Project - 多Agent协作编排平台
 
-本地多Agent协作编排平台。系统只做"人肉中继"做的事：建文件夹、发模版触发词、等agent做完、通知对方、关键节点问用户。
+轻量级多Agent协作编排平台，正在从CLI wrapper架构演进为**自主循环Agent + Harness系统**。
 
-## 快速开始
+## 当前状态
+
+### `main` 分支 — 稳定版（CLI模式）
+- Executor/Reviewer 双agent协作
+- 通过 Claude Code CLI / Codex CLI 驱动agent
+- Lightweight UI + 可选 Star-Office-UI 可视化监控
+- Full-Auto模式、审批流、安全中断
+
+### `feature/cli-to-api` 分支 — 开发中（Harness模式）
+- **目标**：去掉CLI依赖，构建完整Harness系统
+- Agent通过LLM API直接对话（httpx，无subprocess）
+- ReAct自主循环（思考→工具调用→观察→再思考）
+- 每次工具调用都经过系统——可观测、可控制、可记录
+- 客观验证能力（跑测试、编译检查、diff审计）
+- 只需API key即可运行
+
+## 快速开始（main分支）
 
 ### 前置要求
 
@@ -21,16 +37,6 @@ npm install -g @anthropic-ai/claude-code
 claude auth login
 ```
 
-### 安装
-
-```bash
-# 克隆项目
-git clone <repo-url>
-cd codex_project
-
-# 无需安装依赖 — 纯标准库，零第三方包
-```
-
 ### 启动
 
 ```bash
@@ -41,118 +47,84 @@ python server.py
 
 浏览器打开 http://127.0.0.1:8765 即可使用。
 
+### Star-Office-UI 可视化（可选）
+
+系统支持与 [Star-Office-UI](https://github.com/ringhyacinth/Star-Office-UI) 集成，
+在像素风办公室中可视化agent工作状态。
+
+```bash
+# 启动 Star-Office-UI（需单独克隆和安装）
+cd Star-Office-UI && python backend/app.py
+# 在我们的UI侧边栏点击"Star-Office"按钮连接
+```
+
 ## 使用流程
 
 ```
-1. 创建 Room
-   - 点击 [+]，填写 Room ID、Workspace（真实存在的项目路径）
-   - 选择 Executor/Reviewer 的 Provider（claude 或 codex）
-
-2. Onboard
-   - 点击 [Onboard]，系统给双方agent发送角色手册
-   - 执行人和监督人分别了解自己的职责
-   - 流式输出：可以实时看到agent的思考过程
-   - 中途可安全 Interrupt，不会意外跳到下一个agent
-
-3. 下发任务
-   - Onboard完成后弹出任务输入框
-   - 输入你想让执行人做的事情，回车发送
-
-4. 协作循环（两种触发方式）
-   a) [Next Round]: 直接触发目标agent读邮箱并工作
-   b) 输入框发消息: agent同样走完整轮次流程，
-      但你的消息会作为[用户补充说明]一并发送
-   → 目标agent自动选对方（执行人刚回复 → 默认选监督人），
-     也可手动切换
-
-5. Full-Auto 模式
-   - [▶ Full-Auto]: executor ↔ reviewer 全自动循环
-   - 失败自动重试（单轮最多2次），连续3轮失败自动暂停
-   - 用户发任何消息即可恢复
-   - 监督人达成共识时自动暂停，等待用户确认
-
-6. 审批
-   - [Approve]: 确认当前阶段完成
-   - [Reject]: 驳回，要求继续修改
+1. 创建 Room — 填写 Room ID、Workspace、选择 Provider
+2. Onboard — 系统给双方agent发送角色手册
+3. 下发任务 — 输入任务描述，回车发送
+4. 协作循环 — executor ↔ reviewer 轮流工作
+5. Full-Auto — 一键全自动循环，共识时自动暂停
+6. 审批 — Approve 完成 / Reject 继续修改
 ```
-
-## 核心特性
-
-| 特性 | 说明 |
-|------|------|
-| **统一消息发送** | Send = Next Round + 用户消息。agent走完整轮次流程（读邮箱→执行→写邮箱），用户的话作为补充上下文 |
-| **智能 Target** | 自动默认选对方agent（执行人说完→选监督人），可手动覆盖 |
-| **安全中断** | Interrupt 设置协作标志，在检查点优雅停止，不会跳到下一agent |
-| **重试容错** | 失败自动重试2次，连续3轮失败暂停并提示用户 |
-| **共识检测** | Full-Auto模式下，监督人审核通过时自动暂停等待确认 |
-| **流式输出** | agent思考过程实时展示，带打字光标动画 |
-| **Onboard隔离** | agent在onboard阶段不探索工作区，只读自己的手册 |
 
 ## 架构
 
-### 设计原则
+### 当前架构（main分支）
 
 ```
-系统做的事                系统不做的事
-────────                 ────────
-建文件夹结构              组装上下文
-发模版触发词              解析agent输出
-等agent做完              代agent写邮箱
-通知另一个agent           维护隐式记忆
-关键节点问用户            复杂状态机
-展示对话流
+User → Frontend → HTTP API → Router (编排)
+                                ├→ SessionManager → subprocess(CLI) → [黑盒]
+                                ├→ Store (SQLite)
+                                └→ OfficeSyncBridge → Star-Office-UI
 ```
 
-Agent有自己的持久session和记忆。系统只发一句简单的模版提示词（如"去检查对方的回复，严格分析"），不注入上下文。
+### 目标架构（feature/cli-to-api分支）
 
-### 技术栈
+```
+User → Frontend → HTTP API → Router (编排)
+                                ├→ Agent (ReAct循环)
+                                │    ├→ Provider (httpx → Claude/OpenAI API)
+                                │    └→ Tools (file_ops, shell, search, verify)
+                                │         ↑ 每次调用都经过系统：可观测、可控制
+                                ├→ Store (SQLite + tool_calls表)
+                                └→ OfficeSyncBridge → Star-Office-UI
+```
 
-- **后端**: Python标准库（http.server + sqlite3 + subprocess + threading）
-- **前端**: 原生HTML/CSS/JS（无框架、无构建）
-- **CLI通信**: Claude Code CLI（`--output-format stream-json --verbose`，流式输出）
-- **持久session**: Claude Code的`--session-id` + `--resume`，agent保持完整记忆
-- **存储**: SQLite（3张表：rooms, sessions, messages）+ 文件系统（邮箱文件）
+### 核心特性
+
+| 特性 | 说明 |
+|------|------|
+| **统一消息发送** | Send = Next Round + 用户消息，agent走完整轮次流程 |
+| **智能 Target** | 自动默认选对方agent，可手动覆盖 |
+| **安全中断** | 在检查点优雅停止，不会跳到下一agent |
+| **重试容错** | 失败自动重试2次，连续3轮失败暂停并提示用户 |
+| **共识检测** | Full-Auto模式下，审核通过时自动暂停等待确认 |
+| **流式输出** | agent思考过程实时展示 |
+| **Star-Office集成** | 可选的像素风办公室可视化监控 |
 
 ### 目录结构
 
 ```
 codex_project/
 ├── backend/
-│   ├── server.py           # HTTP Server（8个端点）
+│   ├── server.py           # HTTP Server
 │   └── app/
+│       ├── router.py       # 消息路由 + Full-Auto循环
+│       ├── session_mgr.py  # CLI session管理（将被替换）
+│       ├── store.py        # SQLite存储
 │       ├── scaffolder.py   # Room文件夹结构创建
 │       ├── templates.py    # 模版加载和渲染
-│       ├── session_mgr.py  # CLI session管理（流式Popen）
-│       ├── router.py       # 消息路由（后台线程 + Full-Auto循环）
-│       └── store.py        # SQLite存储（rooms/sessions/messages）
+│       └── office_sync.py  # Star-Office-UI同步桥接
 ├── frontend/
 │   └── site/
 │       ├── index.html      # 单页应用
 │       ├── styles.css      # 深色主题
-│       └── app.js          # Chat UI + 轮询 + Markdown渲染
+│       └── app.js          # Chat UI + 轮询
 ├── templates/              # 5个提示词模版
-│   ├── onboarding.txt      # 首次发角色手册
-│   ├── trigger_execute.txt # 让执行人开始工作
-│   ├── trigger_review.txt  # 让监督人审核
-│   ├── trigger_respond.txt # 让执行人回应反馈
-│   └── trigger_recover.txt # Session恢复
 ├── docs/                   # 文档
 └── tests/                  # 测试
-```
-
-### 邮箱文件结构（每个Room自动生成）
-
-```
-runtime/rooms/{room_id}/.local_agent_ops/
-├── agent_mailbox/
-│   ├── README.txt                    # 使用说明
-│   ├── {执行人}_给_{监督人}.txt       # 执行人→监督人 固定槽位
-│   ├── {监督人}_给_{执行人}.txt       # 监督人→执行人 固定槽位
-│   ├── 共识状态.txt                  # 双方共识
-│   ├── 待决问题.txt                  # 问题追踪
-│   └── 轮次记录.txt                  # 轮次历史
-├── onboarding/                       # 角色手册
-└── recovery/                         # Session恢复文档
 ```
 
 ### API端点
@@ -161,40 +133,24 @@ runtime/rooms/{room_id}/.local_agent_ops/
 |------|------|------|
 | GET | `/api/health` | 健康检查 |
 | GET | `/api/rooms` | 列出所有Room |
-| POST | `/api/rooms` | 创建Room（脚手架 + onboarding） |
+| POST | `/api/rooms` | 创建Room |
 | GET | `/api/rooms/{id}` | Room详情 + 消息流 + 邮箱文件 |
-| DELETE | `/api/rooms/{id}` | 删除Room（DB + 文件夹） |
-| POST | `/api/rooms/{id}/next` | 触发下一轮（onboard/auto/executor/reviewer） |
-| POST | `/api/rooms/{id}/task` | 下发任务给执行人 |
-| POST | `/api/rooms/{id}/auto` | 开启/停止Full-Auto模式 |
-| POST | `/api/rooms/{id}/approve` | 审批/驳回/用户干预 |
-
-### 前端界面
-
-```
-┌──────────┬──────────────────────────────┬─────────────┐
-│ Room列表  │       聊天消息流               │  邮箱文件    │
-│          │                              │  查看器      │
-│ [Room 1] │  系统: 已完成onboarding       │             │
-│ [Room 2] │  执行人: [流式输出思考过程]     │  执行人邮箱  │
-│          │  监督人: [审核结果]            │  监督人邮箱  │
-│          │  系统: 等待用户操作            │  共识状态    │
-│          │                              │  待决问题    │
-│          │ [Onboard] [Next] [Auto] ...  │  轮次记录    │
-│          │ [消息输入框 → target agent]    │             │
-└──────────┴──────────────────────────────┴─────────────┘
-```
+| DELETE | `/api/rooms/{id}` | 删除Room |
+| POST | `/api/rooms/{id}/next` | 触发下一轮 |
+| POST | `/api/rooms/{id}/task` | 下发任务 |
+| POST | `/api/rooms/{id}/auto` | 开启/停止Full-Auto |
+| POST | `/api/rooms/{id}/approve` | 审批/驳回/干预 |
+| POST | `/api/rooms/{id}/interrupt` | 中断当前agent |
+| POST | `/api/office-sync` | 连接/断开Star-Office |
 
 ## 状态流转
 
 ```
 onboarding → awaiting_task → working ⇄ awaiting_approval → completed
                                 ↑              │
-                                └──────────────┘ (用户驳回)
+                                └──────────────┘ (reject)
 ```
 
-- **onboarding**: 给双方agent发角色手册（可安全中断）
-- **awaiting_task**: 等用户输入第一个任务
-- **working**: executor/reviewer轮流工作中（支持重试容错）
-- **awaiting_approval**: 等用户审批（共识检测自动触发）
-- **completed**: 全部完成
+## License
+
+MIT

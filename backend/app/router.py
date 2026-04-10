@@ -226,6 +226,7 @@ class Router:
 
         # Onboard executor
         self.store.add_message(room_id, "system", f"[Onboarding {executor_role}...]")
+        self.office_sync.push("executor", "working", "初始化中...")
         exec_ctx = templates.get_room_context(
             room_dir, executor_role, reviewer_role, room["workspace"],
         )
@@ -244,6 +245,8 @@ class Router:
 
         # Onboard reviewer
         self.store.add_message(room_id, "system", f"[Onboarding {reviewer_role}...]")
+        self.office_sync.push("executor", "idle", "就绪 ✓")
+        self.office_sync.push("reviewer", "working", "初始化中...")
         review_ctx = templates.get_room_context(
             room_dir, reviewer_role, executor_role, room["workspace"],
         )
@@ -256,6 +259,8 @@ class Router:
 
         self.store.update_room_state(room_id, "awaiting_task")
         self.store.add_message(room_id, "system", "Onboarding complete. Please assign a task.")
+        self.office_sync.push("executor", "idle", "待命中，等待任务")
+        self.office_sync.push("reviewer", "idle", "待命中，等待任务")
         logger.info("[%s] Onboarding complete", room_id)
 
     def run_round(self, room_id: str, turn: Turn) -> dict:
@@ -299,7 +304,10 @@ class Router:
             message += f"\n\n[用户补充说明]\n{user_note}"
 
         self.store.add_message(room_id, "system", f"[Triggering {role}...]")
-        self.office_sync.push(turn, "working", f"{role} working...")
+        # Push rich detail to Star-Office
+        other_turn = "reviewer" if turn == "executor" else "executor"
+        self.office_sync.push(turn, "working", f"正在处理任务...")
+        self.office_sync.push(other_turn, "idle", "等待中...")
         msg_id, chunks, on_chunk = self._make_stream_callback(room_id, turn)
         result = self.session_mgr.send_message(
             session_row["session_id"], message, on_chunk=on_chunk,
@@ -310,14 +318,14 @@ class Router:
         # 判定是否成功
         if not result.success:
             logger.warning("[%s] Round %s failed (result.success=False)", room_id, turn)
-            self.office_sync.push(turn, "alert", "Round failed")
+            self.office_sync.push(turn, "alert", f"任务失败 ❌")
             return (False, output)
         if any(output.startswith(m) or output == m for m in self._ERROR_MARKERS):
             logger.warning("[%s] Round %s failed (error marker detected)", room_id, turn)
-            self.office_sync.push(turn, "alert", "Error detected")
+            self.office_sync.push(turn, "alert", f"检测到错误 ⚠️")
             return (False, output)
         logger.info("[%s] Round %s completed (%d chars)", room_id, turn, len(output))
-        self.office_sync.push(turn, "idle", "Round complete")
+        self.office_sync.push(turn, "success", f"完成 ✓ ({len(output)}字)")
         return (True, output)
 
     def approve(self, room_id: str, comment: str = "") -> dict:
@@ -332,6 +340,8 @@ class Router:
         if room["state"] == "awaiting_approval":
             self.store.update_room_state(room_id, "completed")
             self.store.add_message(room_id, "system", "Run completed.")
+            self.office_sync.push("executor", "idle", "任务完成 🎉")
+            self.office_sync.push("reviewer", "idle", "任务完成 🎉")
         else:
             self.store.add_message(room_id, "system", "Approval noted. Continuing.")
 
@@ -347,6 +357,7 @@ class Router:
         self.store.add_message(room_id, "user", msg)
         self.store.update_room_state(room_id, "working")
         self.store.add_message(room_id, "system", "Rejection noted. Back to working.")
+        self.office_sync.push("executor", "working", "被驳回，重新工作中...")
 
         return self._room_snapshot(room_id)
 
@@ -406,6 +417,8 @@ class Router:
         message = f"用户下发了以下任务：\n\n{task}\n\n{trigger}"
 
         self.store.add_message(room_id, "system", f"[Assigning task to {executor_role}...]")
+        self.office_sync.push("executor", "working", f"接收新任务中...")
+        self.office_sync.push("reviewer", "idle", "等待审核...")
         msg_id, chunks, on_chunk = self._make_stream_callback(room_id, "executor")
         result = self.session_mgr.send_message(
             session_row["session_id"], message, on_chunk=on_chunk,
