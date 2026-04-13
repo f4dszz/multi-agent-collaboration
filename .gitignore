@@ -13,3 +13,4 @@ cli-temp/
 node_modules/
 .idea/
 .claude/
+scripts/

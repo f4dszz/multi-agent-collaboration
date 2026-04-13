@@ -2,7 +2,7 @@
 
 ## 一句话概述
 
-**2500行代码、零依赖的多Agent协作编排平台** — 纯Python标准库实现，整个系统一下午就能读完。
+**~4000行代码、零依赖的多Agent协作编排平台** — 纯Python标准库实现，整个系统一下午就能读完。
 
 ---
 
@@ -22,12 +22,12 @@
 
 | 指标 | 数值 | 说明 |
 |------|------|------|
-| 后端代码 | **1,482 行** Python | 7个模块，每个都能单独读完 |
-| 前端代码 | **1,065 行** 原生JS/CSS/HTML | 无框架、无构建步骤 |
-| 总代码量 | **~2,500 行** | 整个可运行的系统 |
+| 后端代码 | **~2,100 行** Python | 7个模块，每个都能单独读完 |
+| 前端代码 | **~1,860 行** 原生JS/CSS/HTML | 无框架、无构建步骤 |
+| 总代码量 | **~4,000 行** | 整个可运行的系统 |
 | 第三方依赖 | **0** | 纯Python标准库 + 原生浏览器API |
 | 数据库表 | **3 张** | rooms, sessions, messages |
-| API端点 | **11 个** | RESTful，全部JSON |
+| API端点 | **12 个** | RESTful，全部JSON |
 | 模版文件 | **5 个** | 纯文本，`{variable}` 替换 |
 
 ---
@@ -49,36 +49,44 @@
 
 | 模块 | 行数 | 职责 |
 |------|------|------|
-| `router.py` | 531 | 核心编排：轮次调度、自动循环、审批流、中断处理 |
-| `session_mgr.py` | 329 | CLI进程生命周期：启动、流式读取、超时、清理 |
-| `server.py` | 257 | HTTP服务器：11个端点 + 静态文件服务 |
-| `store.py` | 172 | SQLite CRUD：3张表，线程安全，WAL模式 |
-| `scaffolder.py` | 135 | 工作区创建：邮箱文件、角色手册、恢复文档 |
-| `templates.py` | 58 | 模版加载：纯字符串替换，无模版引擎 |
-| `office_sync.py` | 200 | Star-Office-UI状态同步桥接（可选） |
+| `router.py` | 703 | 核心编排：轮次调度、自动循环、审批流、邮箱同步、中断处理 |
+| `session_mgr.py` | 396 | CLI进程生命周期：启动、流式读取、超时、清理 |
+| `server.py` | 350 | HTTP服务器：12个端点 + 工作区验证 + 静态文件服务 |
+| `store.py` | 212 | SQLite CRUD：3张表，线程安全，WAL模式 |
+| `scaffolder.py` | 170 | 工作区创建：邮箱文件、角色手册、恢复文档 |
+| `templates.py` | 73 | 模版加载：纯字符串替换，无模版引擎 |
+| `office_sync.py` | 223 | Star-Office-UI状态同步桥接（可选） |
 
 ---
 
 ## 三个核心设计亮点
 
-### 1. 邮箱模式（Mailbox Pattern）
+### 1. 邮箱模式（Mailbox Pattern）+ 系统级同步
 
-Agent之间不直接通信。每个Agent有自己的"发件箱"文件：
+Agent之间不直接通信。每轮结束后，**系统自动**将Agent的输出同步到邮箱文件：
 
 ```
-.local_agent_ops/agent_mailbox/
-├── 执行人_给_监督人.txt     ← 执行人写，监督人读
-├── 监督人_给_执行人.txt     ← 监督人写，执行人读
-├── 共识状态.txt             ← 双方共同维护
-├── 待决问题.txt             ← 问题追踪
-└── 轮次记录.txt             ← 历史记录
+runtime/rooms/{room_id}/.local_agent_ops/agent_mailbox/
+├── 执行人_给_监督人.txt     ← 系统同步执行人的最新输出
+├── 监督人_给_执行人.txt     ← 系统同步监督人的最新输出
+├── 共识状态.txt             ← 状态追踪
+├── 待决问题.txt             ← 问题记录
+└── 轮次记录.txt             ← 完整历史（系统每轮自动追加）
 ```
 
-系统从不替Agent写邮箱，只说"去看对方写了什么"。
+**为什么是系统写而不是Agent写？**
 
-**为什么这么做？**
-- **可审计**：所有沟通就是.txt文件，人类可以直接打开查看
+早期设计让Agent自己写邮箱文件，但在实际运行中遇到了CLI沙箱权限问题：
+Agent的工作区（如 `D:\projects\my-app`）和邮箱目录（`runtime/rooms/...`）
+是不同路径，CLI沙箱只授予工作区写权限，导致Agent无法写入邮箱。
+
+解决方案：`_sync_mailbox()` 在每轮结束后由系统代写。这也符合Harness设计理念
+——系统控制所有I/O，Agent专注于思考。
+
+**设计优势：**
+- **可审计**：所有沟通都是纯文本文件，`cat` 就能查看
 - **可恢复**：Agent崩溃后从文件恢复上下文，不依赖内存
+- **绕过沙箱**：系统级写入，不受CLI权限限制
 - **解耦**：Agent不需要知道对方的实现细节
 
 ### 2. 编排与执行完全解耦
@@ -95,6 +103,14 @@ Agent之间不直接通信。每个Agent有自己的"发件箱"文件：
 ```
 
 当前支持 Claude Code CLI 和 Codex CLI，但架构上对任何CLI工具开放。
+
+### 2.5 工作区验证与动态切换
+
+创建Room时，系统验证工作区目录的**存在性**和**写权限**（通过创建+删除临时文件测试）。
+运行时支持通过 `POST /api/rooms/{id}/workspace` 动态切换工作区，切换时会：
+- 验证新路径的有效性
+- 检查Room是否正在工作中（忙碌时拒绝切换）
+- 更新Session配置并发送系统消息通知Agent
 
 ### 3. 人机协作光谱
 
@@ -176,6 +192,8 @@ onboarding → awaiting_task → working ⇄ awaiting_approval → completed
 | **自动重试** | 单轮失败最多重试2次 |
 | **自动暂停** | 连续3轮失败自动暂停Full-Auto，等待用户介入 |
 | **共识检测** | 扫描输出关键词（"无异议"/"approved"），自动暂停请求确认 |
+| **工作区验证** | 创建/切换时验证目录存在+写权限，防止运行时路径错误 |
+| **邮箱代写** | 系统级 `_sync_mailbox()` 绕过CLI沙箱限制，保证邮箱一致性 |
 | **进程清理** | Room删除时级联终止所有子进程 + 删除DB记录 + 清理文件 |
 | **Session恢复** | 崩溃后Agent可从recovery文件快速重建上下文 |
 
@@ -206,25 +224,10 @@ onboarding → awaiting_task → working ⇄ awaiting_approval → completed
 - 需要**快速搭建**Agent协作原型的团队（零依赖，clone即跑）
 
 ### ⚠️ 局限
-- **不是Harness**：看不到Agent内部的工具调用和推理过程（正在开发中）
-- **依赖外部CLI**：需要安装Claude Code或Codex CLI（API模式开发中）
+- **黑盒执行**：看不到Agent内部的工具调用和推理过程（Agent内部行为由CLI控制）
+- **依赖外部CLI**：需要安装Claude Code或Codex CLI
 - **单用户设计**：没有认证系统和多租户支持
 - **轮询模式**：前端3秒刷新一次，不是WebSocket实时推送
-
----
-
-## 演进方向
-
-当前 `main` 分支是稳定的CLI模式。`feature/cli-to-api` 分支正在将系统从
-**编排器（Orchestrator）** 进化为 **线束系统（Harness）**：
-
-| 维度 | 现在（CLI模式） | 目标（Harness模式） |
-|------|-----------------|---------------------|
-| Agent执行 | CLI子进程（黑盒） | ReAct自主循环（可观测） |
-| 工具调用 | Agent自行决定（不可见） | 每次经过系统（可控制、可记录） |
-| 成功验证 | Reviewer主观判断 | 客观验证（测试通过？编译成功？） |
-| LLM通信 | 通过CLI中转 | httpx直调API |
-| 依赖要求 | Python + Node.js + CLI工具 | Python + API key |
 
 ---
 
@@ -232,11 +235,11 @@ onboarding → awaiting_task → working ⇄ awaiting_approval → completed
 
 ```bash
 git clone https://github.com/f4dszz/multi-agent-collaboration.git
-cd codex_project/backend
+cd multi-agent-collaboration/backend
 python server.py
 # 打开 http://127.0.0.1:8765
 ```
 
 ---
 
-*最后更新：2026-04-11*
+*最后更新：2026-04-13*
