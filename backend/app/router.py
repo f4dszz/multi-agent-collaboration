@@ -95,6 +95,49 @@ class Router:
                 return True
         return False
 
+    def _sync_mailbox(self, room_id: str, turn: Turn, output: str) -> None:
+        """系统代写邮箱：将agent的回复写入对应的outbox文件。
+        解决CLI沙箱阻止agent直接写入runtime目录的问题。
+        """
+        try:
+            room = self.store.get_room(room_id)
+            if not room:
+                return
+            room_dir = self.runtime_root / "rooms" / room_id
+            mailbox_dir = room_dir / ".local_agent_ops" / "agent_mailbox"
+            if not mailbox_dir.exists():
+                return
+
+            executor_role = room["executor_role"]
+            reviewer_role = room["reviewer_role"]
+
+            if turn == "executor":
+                role, other_role = executor_role, reviewer_role
+            else:
+                role, other_role = reviewer_role, executor_role
+
+            # Write agent output to outbox
+            outbox = mailbox_dir / f"{role}_给_{other_role}.txt"
+            from datetime import datetime, timezone
+            timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            outbox.write_text(
+                f"# {role} → {other_role}\n"
+                f"# 更新时间: {timestamp}\n\n"
+                f"{output}\n",
+                encoding="utf-8",
+            )
+
+            # Update rounds log
+            rounds_file = mailbox_dir / "轮次记录.txt"
+            existing = rounds_file.read_text(encoding="utf-8") if rounds_file.exists() else "# 轮次记录\n"
+            summary = output[:200].replace("\n", " ")
+            existing += f"\n[{timestamp}] {role}: {summary}{'...' if len(output) > 200 else ''}\n"
+            rounds_file.write_text(existing, encoding="utf-8")
+
+            logger.debug("[%s] Mailbox synced for %s (%d chars)", room_id, turn, len(output))
+        except Exception as exc:
+            logger.warning("[%s] Mailbox sync failed: %s", room_id, exc)
+
     def _ensure_session(self, session_row: dict, workspace: str, room_id: str = "") -> None:
         """确保DB里的session在SessionManager内存中存在（处理server重启）。"""
         room_dir = str(self.runtime_root / "rooms" / room_id) if room_id else ""
@@ -343,6 +386,9 @@ class Router:
         output = result.output_text or "\n".join(chunks) or "[No response]"
         self.store.update_message(msg_id, output)
 
+        # 系统代写邮箱 — 无论agent能否直接写，保证邮箱数据一致
+        self._sync_mailbox(room_id, turn, output)
+
         # 判定是否成功
         if not result.success:
             logger.warning("[%s] Round %s failed (result.success=False)", room_id, turn)
@@ -452,6 +498,7 @@ class Router:
             session_row["session_id"], message, on_chunk=on_chunk,
         )
         self.store.update_message(msg_id, result.output_text or "\n".join(chunks) or "[No response]")
+        self._sync_mailbox(room_id, "executor", result.output_text or "\n".join(chunks) or "[No response]")
 
         # 如果是auto mode，继续触发reviewer
         with self._get_lock(room_id):
@@ -625,7 +672,9 @@ class Router:
         result = self.session_mgr.send_message(
             session_row["session_id"], prefixed, on_chunk=on_chunk,
         )
-        self.store.update_message(msg_id, result.output_text or "\n".join(chunks) or "[No response]")
+        output = result.output_text or "\n".join(chunks) or "[No response]"
+        self.store.update_message(msg_id, output)
+        self._sync_mailbox(room_id, target, output)
 
     def _room_snapshot(self, room_id: str) -> dict:
         """构建room当前状态的快照。"""

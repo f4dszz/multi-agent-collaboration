@@ -89,7 +89,11 @@ class SessionManager:
         cli_session_id: str, workspace: str, room_dir: str = "",
     ) -> Session:
         if session_id in self._sessions:
-            return self._sessions[session_id]
+            existing = self._sessions[session_id]
+            # Update room_dir if not set (handles sessions created before this field existed)
+            if room_dir and not existing.room_dir:
+                existing.room_dir = room_dir
+            return existing
         session = Session(
             session_id=session_id, role=role, provider=provider,
             cli_session_id=cli_session_id, workspace=workspace,
