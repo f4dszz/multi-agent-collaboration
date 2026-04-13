@@ -95,14 +95,16 @@ class Router:
                 return True
         return False
 
-    def _ensure_session(self, session_row: dict, workspace: str) -> None:
+    def _ensure_session(self, session_row: dict, workspace: str, room_id: str = "") -> None:
         """确保DB里的session在SessionManager内存中存在（处理server重启）。"""
+        room_dir = str(self.runtime_root / "rooms" / room_id) if room_id else ""
         self.session_mgr.restore_session(
             session_id=session_row["session_id"],
             role=session_row["role"],
             provider=session_row["provider"],
             cli_session_id=session_row["cli_session_id"],
             workspace=workspace,
+            room_dir=room_dir,
         )
 
     def _run_in_background(self, room_id: str, fn, *args) -> None:
@@ -207,9 +209,11 @@ class Router:
 
         exec_session = self.session_mgr.create_session(
             role="executor", provider=executor_provider, workspace=workspace,
+            room_dir=str(room_dir),
         )
         review_session = self.session_mgr.create_session(
             role="reviewer", provider=reviewer_provider, workspace=workspace,
+            room_dir=str(room_dir),
         )
 
         self.store.add_session(
@@ -245,8 +249,8 @@ class Router:
         sessions = self.store.get_sessions_for_room(room_id)
         exec_session_row = next(s for s in sessions if s["role"] == "executor")
         review_session_row = next(s for s in sessions if s["role"] == "reviewer")
-        self._ensure_session(exec_session_row, room["workspace"])
-        self._ensure_session(review_session_row, room["workspace"])
+        self._ensure_session(exec_session_row, room["workspace"], room_id)
+        self._ensure_session(review_session_row, room["workspace"], room_id)
 
         # Onboard executor
         self.store.add_message(room_id, "system", f"[Onboarding {executor_role}...]")
@@ -309,7 +313,7 @@ class Router:
 
         sessions = self.store.get_sessions_for_room(room_id)
         session_row = next(s for s in sessions if s["role"] == turn)
-        self._ensure_session(session_row, room["workspace"])
+        self._ensure_session(session_row, room["workspace"], room_id)
 
         if turn == "executor":
             role, other_role = executor_role, reviewer_role
@@ -434,7 +438,7 @@ class Router:
 
         sessions = self.store.get_sessions_for_room(room_id)
         session_row = next(s for s in sessions if s["role"] == "executor")
-        self._ensure_session(session_row, room["workspace"])
+        self._ensure_session(session_row, room["workspace"], room_id)
 
         ctx = templates.get_room_context(room_dir, executor_role, reviewer_role, room["workspace"])
         trigger = templates.render("trigger_execute", **ctx)
@@ -615,7 +619,7 @@ class Router:
         room = self.store.get_room(room_id)
         sessions = self.store.get_sessions_for_room(room_id)
         session_row = next(s for s in sessions if s["role"] == target)
-        self._ensure_session(session_row, room["workspace"])
+        self._ensure_session(session_row, room["workspace"], room_id)
         prefixed = f"[用户直接指令] 以下是用户对你的直接消息，请认真对待并回复：\n\n{message}"
         msg_id, chunks, on_chunk = self._make_stream_callback(room_id, target)
         result = self.session_mgr.send_message(

@@ -52,6 +52,7 @@ class Session:
     provider: Provider
     cli_session_id: str
     workspace: str
+    room_dir: str = ""  # runtime/rooms/{room_id} — for mailbox access
     alive: bool = True
     round_count: int = 0
 
@@ -72,25 +73,27 @@ class SessionManager:
 
     # --- Session CRUD ---
 
-    def create_session(self, role: str, provider: Provider, workspace: str) -> Session:
+    def create_session(self, role: str, provider: Provider, workspace: str, room_dir: str = "") -> Session:
         session_id = str(uuid.uuid4())[:8]
         cli_session_id = str(uuid.uuid4())
         session = Session(
             session_id=session_id, role=role, provider=provider,
             cli_session_id=cli_session_id, workspace=workspace,
+            room_dir=room_dir,
         )
         self._sessions[session_id] = session
         return session
 
     def restore_session(
         self, session_id: str, role: str, provider: str,
-        cli_session_id: str, workspace: str,
+        cli_session_id: str, workspace: str, room_dir: str = "",
     ) -> Session:
         if session_id in self._sessions:
             return self._sessions[session_id]
         session = Session(
             session_id=session_id, role=role, provider=provider,
             cli_session_id=cli_session_id, workspace=workspace,
+            room_dir=room_dir,
             round_count=1,
         )
         self._sessions[session_id] = session
@@ -271,6 +274,9 @@ class SessionManager:
             "--permission-mode", "acceptEdits",
             "--add-dir", session.workspace,
         ])
+        # Add room directory for mailbox access (if different from workspace)
+        if session.room_dir and str(Path(session.room_dir).resolve()) != str(Path(session.workspace).resolve()):
+            command.extend(["--add-dir", session.room_dir])
 
         final_result: list[str] = []
 
