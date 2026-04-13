@@ -79,6 +79,14 @@ class Store:
             )
             self.conn.commit()
 
+    def update_room_workspace(self, room_id: str, workspace: str) -> None:
+        """更新房间的工作目录。"""
+        with self._lock:
+            self.conn.execute(
+                "UPDATE rooms SET workspace = ? WHERE room_id = ?", (workspace, room_id)
+            )
+            self.conn.commit()
+
     def delete_room(self, room_id: str) -> None:
         """删除room及其所有关联数据。"""
         with self._lock:

@@ -1,0 +1,9 @@
+# Use these only when Clash Verge is in Rule mode.
+# They route Claude Desktop and Claude web traffic to the existing IPRoyal Exit group.
+
+- PROCESS-NAME,Claude.exe,IPRoyal Exit
+- PROCESS-NAME,cowork-svc.exe,IPRoyal Exit
+- DOMAIN-SUFFIX,claude.ai,IPRoyal Exit
+- DOMAIN-SUFFIX,anthropic.com,IPRoyal Exit
+- DOMAIN,api.anthropic.com,IPRoyal Exit
+- DOMAIN,downloads.claude.ai,IPRoyal Exit

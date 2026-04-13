@@ -86,6 +86,26 @@ class Handler(BaseHTTPRequestHandler):
                     self._json_response({"error": "room_id and workspace required"}, status=400)
                     return
 
+                # Validate workspace before creating room
+                ws_path = Path(workspace)
+                if not ws_path.exists():
+                    self._json_response({"error": f"Workspace目录不存在: {workspace}"}, status=400)
+                    return
+                if not ws_path.is_dir():
+                    self._json_response({"error": f"Workspace路径不是目录: {workspace}"}, status=400)
+                    return
+                try:
+                    # Test write permission
+                    test_file = ws_path / ".codex_write_test"
+                    test_file.touch()
+                    test_file.unlink()
+                except PermissionError:
+                    self._json_response({"error": f"Workspace目录无写入权限: {workspace}"}, status=400)
+                    return
+                except Exception as e:
+                    self._json_response({"error": f"Workspace目录访问异常: {e}"}, status=400)
+                    return
+
                 snapshot = router.create_room(
                     room_id, workspace, task,
                     executor_role, reviewer_role,
@@ -157,6 +177,26 @@ class Handler(BaseHTTPRequestHandler):
                     return
 
                 self._json_response(snapshot)
+
+            elif (m := re.match(r"^/api/rooms/([^/]+)/workspace$", path)):
+                room_id = m.group(1)
+                new_workspace = body.get("workspace", "")
+                if not new_workspace:
+                    self._json_response({"error": "workspace is required"}, status=400)
+                    return
+                ws_path = Path(new_workspace)
+                if not ws_path.is_dir():
+                    self._json_response({"error": f"目录不存在: {new_workspace}"}, status=400)
+                    return
+                try:
+                    test_file = ws_path / ".codex_write_test"
+                    test_file.touch()
+                    test_file.unlink()
+                except PermissionError:
+                    self._json_response({"error": f"无写入权限: {new_workspace}"}, status=400)
+                    return
+                router.update_workspace(room_id, new_workspace)
+                self._json_response(router._room_snapshot(room_id))
 
             elif path == "/api/office-sync":
                 action = body.get("action", "status")

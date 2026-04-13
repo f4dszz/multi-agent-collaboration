@@ -90,12 +90,20 @@ function renderRoomList() {
         <div>
           <div class="room-name">${esc(r.room_id)}</div>
           <div class="room-meta">${esc(r.state)} &middot; ${esc(r.task || "no task")}</div>
+          <div class="room-workspace" title="${esc(r.workspace)}">${esc(shortenPath(r.workspace))}</div>
         </div>
       </div>
       <button class="room-delete" onclick="event.stopPropagation();deleteRoom('${r.room_id}')" title="Delete room">&times;</button>
     </div>`
     )
     .join("");
+}
+
+function shortenPath(p) {
+  if (!p) return "";
+  const parts = p.replace(/\\/g, "/").split("/");
+  if (parts.length <= 3) return p;
+  return ".../" + parts.slice(-2).join("/");
 }
 
 async function selectRoom(roomId) {
@@ -125,6 +133,18 @@ async function deleteRoom(roomId) {
   }
 }
 
+async function changeWorkspace(roomId) {
+  const newPath = prompt("输入新的Workspace目录路径:");
+  if (!newPath) return;
+  try {
+    await api("POST", `/api/rooms/${roomId}/workspace`, { workspace: newPath });
+    await loadRoom(roomId);
+    await loadRooms();
+  } catch (err) {
+    showError(err.message);
+  }
+}
+
 // --- Room detail ---
 
 async function loadRoom(roomId, silent) {
@@ -145,6 +165,16 @@ function renderRoom(data, silent) {
     `${room.room_id} — ${room.task || ""}`;
   const badge = document.getElementById("room-state");
   badge.textContent = busy ? `${room.state} (working...)` : room.state;
+
+  // Show workspace path in header
+  let wsEl = document.getElementById("room-workspace-info");
+  if (!wsEl) {
+    wsEl = document.createElement("div");
+    wsEl.id = "room-workspace-info";
+    wsEl.style.cssText = "font-size:11px;color:var(--text-dim);font-family:var(--font-term);margin-top:2px;cursor:pointer;display:flex;align-items:center;gap:4px";
+    document.getElementById("chat-header").appendChild(wsEl);
+  }
+  wsEl.innerHTML = `<span title="${esc(room.workspace)}">📁 ${esc(room.workspace)}</span><button onclick="changeWorkspace('${room.room_id}')" style="font-size:10px;padding:1px 6px;cursor:pointer;background:var(--bg);border:1px solid var(--border);border-radius:3px;color:var(--text-dim)" title="修改workspace">✏️</button>`;
 
   // Detect if messages changed (new message or streaming content update)
   const lastMsg = messages.length > 0 ? messages[messages.length - 1] : null;

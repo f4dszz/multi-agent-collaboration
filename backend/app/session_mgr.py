@@ -256,7 +256,10 @@ class SessionManager:
         if not node or not CLAUDE_CLI_JS.exists():
             raise RuntimeError("Claude Code CLI not available")
         if not Path(session.workspace).is_dir():
-            raise RuntimeError(f"Workspace does not exist: {session.workspace}")
+            raise RuntimeError(
+                f"Workspace目录不存在或不可访问: {session.workspace}\n"
+                "请在前端修改workspace路径，或确认目录存在且有读写权限。"
+            )
 
         command = [node, str(CLAUDE_CLI_JS), "-p"]
         if session.round_count == 0:

@@ -159,6 +159,30 @@ class Router:
         with self._meta_lock:
             self._room_locks.pop(room_id, None)
 
+    def update_workspace(self, room_id: str, new_workspace: str) -> None:
+        """更新room的workspace，同时更新关联session的workspace。"""
+        room = self.store.get_room(room_id)
+        if not room:
+            raise ValueError(f"Room not found: {room_id}")
+        if self.is_busy(room_id):
+            raise ValueError("Agent正在工作中，请先中断后再修改workspace")
+
+        old_ws = room["workspace"]
+        self.store.update_room_workspace(room_id, new_workspace)
+
+        # Update in-memory sessions
+        sessions = self.store.get_sessions_for_room(room_id)
+        for s in sessions:
+            session = self.session_mgr.get_session(s["session_id"])
+            if session:
+                session.workspace = new_workspace
+
+        self.store.add_message(
+            room_id, "system",
+            f"[Workspace changed]\n{old_ws} → {new_workspace}",
+        )
+        logger.info("[%s] Workspace updated: %s -> %s", room_id, old_ws, new_workspace)
+
     def create_room(
         self,
         room_id: str,
