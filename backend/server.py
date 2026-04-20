@@ -1,6 +1,7 @@
 """HTTP Server - 精简的6个端点。
 
 GET  /api/health
+GET  /api/providers           → 列出可用CLI provider
 GET  /api/rooms              → 列出所有room
 POST /api/rooms              → 创建room
 GET  /api/rooms/{id}         → room详情 + 消息流 + 邮箱文件
@@ -48,6 +49,19 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/health":
             self._json_response({"status": "ok", "runtime_root": str(RUNTIME_ROOT)})
+
+        elif path == "/api/providers":
+            providers = [
+                {
+                    "id": p.id,
+                    "label": p.label,
+                    "description": p.description,
+                    "available": p.available,
+                    "error": p.error,
+                }
+                for p in session_mgr.provider_registry.statuses()
+            ]
+            self._json_response({"providers": providers})
 
         elif path == "/api/rooms":
             rooms = store.list_rooms()

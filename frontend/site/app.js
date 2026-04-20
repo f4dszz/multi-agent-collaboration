@@ -5,6 +5,7 @@ const API = "";
 const state = {
   selectedRoomId: null,
   rooms: [],
+  providers: [],
   polling: null,
   msgCount: 0,
   lastMsgContent: "",    // track last message content for streaming updates
@@ -47,6 +48,7 @@ async function init() {
     }
   };
 
+  await loadProviders();
   await loadRooms();
   state.polling = setInterval(() => {
     if (state.selectedRoomId) loadRoom(state.selectedRoomId, true);
@@ -63,6 +65,40 @@ async function init() {
   document.getElementById("intervene-target").addEventListener("change", () => {
     document.getElementById("intervene-target").dataset.userOverride = "1";
   });
+}
+
+async function loadProviders() {
+  try {
+    const data = await api("GET", "/api/providers");
+    state.providers = data.providers || [];
+  } catch {
+    state.providers = [
+      { id: "claude", label: "Claude", available: false },
+      { id: "codex", label: "Codex", available: false },
+    ];
+  }
+  renderProviderOptions("executor_provider");
+  renderProviderOptions("reviewer_provider");
+}
+
+function renderProviderOptions(selectName) {
+  const select = document.querySelector(`select[name="${selectName}"]`);
+  if (!select) return;
+  const providers = state.providers.length
+    ? state.providers
+    : [{ id: "claude", label: "Claude" }, { id: "codex", label: "Codex" }];
+  select.innerHTML = providers
+    .map((p) => {
+      const disabled = p.available === false ? "disabled" : "";
+      const suffix = p.available === false ? " (not found)" : "";
+      const title = p.error ? ` title="${esc(p.error)}"` : "";
+      return `<option value="${esc(p.id)}" ${disabled}${title}>${esc(p.label || p.id)}${suffix}</option>`;
+    })
+    .join("");
+  if (![...select.options].some((option) => !option.disabled && option.selected)) {
+    const firstAvailable = [...select.options].find((option) => !option.disabled);
+    if (firstAvailable) firstAvailable.selected = true;
+  }
 }
 
 // --- Rooms ---
