@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from .base import ProviderAdapter, ProviderStatus
 from .claude import ClaudeProvider
-from .codex import CodexProvider
+from .codex_app_server import CodexAppServerProvider
 
 
 class ProviderRegistry:
@@ -16,7 +16,7 @@ class ProviderRegistry:
 
     def __init__(self, providers: list[ProviderAdapter] | None = None) -> None:
         self._providers: dict[str, ProviderAdapter] = {}
-        for provider in providers or [ClaudeProvider(), CodexProvider()]:
+        for provider in providers or [ClaudeProvider(), CodexAppServerProvider()]:
             self.register(provider)
 
     def register(self, provider: ProviderAdapter) -> None:

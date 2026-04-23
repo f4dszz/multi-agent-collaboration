@@ -13,9 +13,11 @@ import logging
 import shutil
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
+from .permissions import new_permission_request
 from . import templates
 from .office_sync import OfficeSyncBridge
 from .scaffolder import create_room
@@ -147,6 +149,7 @@ class Router:
             provider=session_row["provider"],
             cli_session_id=session_row["cli_session_id"],
             workspace=workspace,
+            room_id=room_id,
             room_dir=room_dir,
         )
 
@@ -186,6 +189,28 @@ class Router:
             self.store.update_message(msg_id, "\n".join(chunks))
 
         return msg_id, chunks, on_chunk
+
+    def _persist_permission_event(self, room_id: str, session_row: dict, event) -> None:
+        request = event.permission_request
+        if not request:
+            return
+        permission = new_permission_request(
+            request_id=request.request_id,
+            room_id=room_id,
+            session_id=session_row["session_id"],
+            provider=session_row["provider"],
+            turn_id=event.turn_id,
+            kind=request.kind,
+            title=request.title,
+            description=request.description,
+            payload=request.payload,
+        )
+        self.store.add_permission_request(permission)
+        self.store.add_message(
+            room_id,
+            "system",
+            f"[Permission requested] {request.title}",
+        )
 
     def delete_room(self, room_id: str) -> None:
         """删除room：停止auto、清DB、删文件夹。"""
@@ -252,10 +277,12 @@ class Router:
 
         exec_session = self.session_mgr.create_session(
             role="executor", provider=executor_provider, workspace=workspace,
+            room_id=room_id,
             room_dir=str(room_dir),
         )
         review_session = self.session_mgr.create_session(
             role="reviewer", provider=reviewer_provider, workspace=workspace,
+            room_id=room_id,
             room_dir=str(room_dir),
         )
 
@@ -304,7 +331,11 @@ class Router:
         exec_msg = templates.render("onboarding", **exec_ctx)
         msg_id, chunks, on_chunk = self._make_stream_callback(room_id, "executor")
         exec_result = self.session_mgr.send_message(
-            exec_session_row["session_id"], exec_msg, on_chunk=on_chunk,
+            exec_session_row["session_id"],
+            exec_msg,
+            on_chunk=on_chunk,
+            on_event=lambda event: self._persist_permission_event(room_id, exec_session_row, event)
+            if event.type == "permission_requested" else None,
         )
         # Replace streaming placeholder with final result
         self.store.update_message(msg_id, exec_result.output_text or "\n".join(chunks) or "[No response]")
@@ -324,7 +355,11 @@ class Router:
         review_msg = templates.render("onboarding", **review_ctx)
         msg_id2, chunks2, on_chunk2 = self._make_stream_callback(room_id, "reviewer")
         review_result = self.session_mgr.send_message(
-            review_session_row["session_id"], review_msg, on_chunk=on_chunk2,
+            review_session_row["session_id"],
+            review_msg,
+            on_chunk=on_chunk2,
+            on_event=lambda event: self._persist_permission_event(room_id, review_session_row, event)
+            if event.type == "permission_requested" else None,
         )
         self.store.update_message(msg_id2, review_result.output_text or "\n".join(chunks2) or "[No response]")
 
@@ -381,7 +416,11 @@ class Router:
         self.office_sync.push(other_turn, "idle", "等待中...")
         msg_id, chunks, on_chunk = self._make_stream_callback(room_id, turn)
         result = self.session_mgr.send_message(
-            session_row["session_id"], message, on_chunk=on_chunk,
+            session_row["session_id"],
+            message,
+            on_chunk=on_chunk,
+            on_event=lambda event: self._persist_permission_event(room_id, session_row, event)
+            if event.type == "permission_requested" else None,
         )
         output = result.output_text or "\n".join(chunks) or "[No response]"
         self.store.update_message(msg_id, output)
@@ -495,7 +534,11 @@ class Router:
         self.office_sync.push("reviewer", "idle", "等待审核...")
         msg_id, chunks, on_chunk = self._make_stream_callback(room_id, "executor")
         result = self.session_mgr.send_message(
-            session_row["session_id"], message, on_chunk=on_chunk,
+            session_row["session_id"],
+            message,
+            on_chunk=on_chunk,
+            on_event=lambda event: self._persist_permission_event(room_id, session_row, event)
+            if event.type == "permission_requested" else None,
         )
         self.store.update_message(msg_id, result.output_text or "\n".join(chunks) or "[No response]")
         self._sync_mailbox(room_id, "executor", result.output_text or "\n".join(chunks) or "[No response]")
@@ -670,7 +713,11 @@ class Router:
         prefixed = f"[用户直接指令] 以下是用户对你的直接消息，请认真对待并回复：\n\n{message}"
         msg_id, chunks, on_chunk = self._make_stream_callback(room_id, target)
         result = self.session_mgr.send_message(
-            session_row["session_id"], prefixed, on_chunk=on_chunk,
+            session_row["session_id"],
+            prefixed,
+            on_chunk=on_chunk,
+            on_event=lambda event: self._persist_permission_event(room_id, session_row, event)
+            if event.type == "permission_requested" else None,
         )
         output = result.output_text or "\n".join(chunks) or "[No response]"
         self.store.update_message(msg_id, output)
@@ -681,6 +728,7 @@ class Router:
         room = self.store.get_room(room_id)
         messages = self.store.get_messages(room_id)
         sessions = self.store.get_sessions_for_room(room_id)
+        permission_requests = self.store.list_permission_requests(room_id)
 
         mailbox_files = {}
         room_dir = self.runtime_root / "rooms" / room_id
@@ -698,6 +746,32 @@ class Router:
             "messages": messages,
             "sessions": sessions,
             "mailbox_files": mailbox_files,
+            "permission_requests": permission_requests,
             "busy": busy,
             "auto_mode": auto_mode,
         }
+
+    def resolve_permission(
+        self,
+        room_id: str,
+        request_id: str,
+        decision: str,
+        payload: dict | None = None,
+    ) -> dict:
+        permission = self.store.get_permission_request(request_id)
+        if not permission or permission["room_id"] != room_id:
+            raise ValueError(f"Permission request not found: {request_id}")
+        if permission["status"] != "pending":
+            raise ValueError(f"Permission request already resolved: {request_id}")
+        session_id = permission["session_id"]
+        provider_payload = self.session_mgr.resolve_permission(
+            session_id=session_id,
+            request_id=request_id,
+            decision=decision,
+            payload=payload or {},
+        )
+        status = "approved" if decision in ("allow", "allow_session", "answer") else "denied"
+        self.store.resolve_permission_request(request_id, status)
+        note = "allowed" if status == "approved" else "denied"
+        self.store.add_message(room_id, "system", f"[Permission {note}] {request_id}")
+        return self._room_snapshot(room_id)

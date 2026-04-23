@@ -7,10 +7,13 @@ and process execution.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Protocol
 
+from ..permissions import PermissionResolution
 
+
+ProviderEventHandler = Callable[["ProviderEvent"], None]
 OnChunk = Callable[[str, str], None]
 LineParser = Callable[[dict], str | None]
 StreamRunner = Callable[
@@ -43,6 +46,30 @@ class ProviderResult:
     duration_ms: int
     success: bool
     output_text: str
+    turn_id: str = ""
+    permission_requests: list["ProviderPermissionRequest"] = field(default_factory=list)
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderPermissionRequest:
+    """Provider-agnostic permission request emitted during a turn."""
+
+    request_id: str
+    kind: str
+    title: str
+    description: str
+    payload: dict
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderEvent:
+    """Structured provider runtime event."""
+
+    type: str
+    turn_id: str
+    content: str = ""
+    metadata: dict | None = None
+    permission_request: ProviderPermissionRequest | None = None
 
 
 class ProviderSession(Protocol):
@@ -73,7 +100,16 @@ class ProviderAdapter(Protocol):
         message: str,
         timeout: int,
         on_chunk: OnChunk | None,
+        on_event: ProviderEventHandler | None,
         run_stream: StreamRunner,
         on_cli_session_update: CliSessionUpdate | None,
     ) -> ProviderResult:
         """Send one message to a provider session."""
+
+    def resolve_permission(
+        self,
+        session: ProviderSession,
+        request_id: str,
+        resolution: PermissionResolution,
+    ) -> dict:
+        """Resolve one previously emitted permission request."""

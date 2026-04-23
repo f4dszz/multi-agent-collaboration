@@ -9,6 +9,8 @@ from pathlib import Path
 from .base import (
     CliSessionUpdate,
     OnChunk,
+    ProviderEvent,
+    ProviderEventHandler,
     ProviderResult,
     ProviderSession,
     ProviderStatus,
@@ -47,6 +49,7 @@ class CodexProvider:
         message: str,
         timeout: int,
         on_chunk: OnChunk | None,
+        on_event: ProviderEventHandler | None,
         run_stream: StreamRunner,
         on_cli_session_update: CliSessionUpdate | None,
     ) -> ProviderResult:
@@ -54,6 +57,7 @@ class CodexProvider:
         if not executable:
             raise RuntimeError("Codex CLI not available")
 
+        turn_id = f"{session.session_id}:round:{session.round_count + 1}"
         temp_dir = Path(session.workspace) / "cli-temp"
         temp_dir.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(
@@ -94,10 +98,22 @@ class CodexProvider:
                 if itype == "agent_message" and text:
                     if on_chunk:
                         on_chunk("text", text)
+                    if on_event:
+                        on_event(ProviderEvent(
+                            type="message_delta",
+                            turn_id=turn_id,
+                            content=text,
+                        ))
                     return text
                 if itype == "reasoning" and text:
                     if on_chunk:
                         on_chunk("tool", f"[Thinking] {text[:200]}")
+                    if on_event:
+                        on_event(ProviderEvent(
+                            type="reasoning",
+                            turn_id=turn_id,
+                            content=text,
+                        ))
             return None
 
         rc, collected, stderr, duration_ms = run_stream(
@@ -128,4 +144,5 @@ class CodexProvider:
             duration_ms=duration_ms,
             success=(rc == 0),
             output_text=output.strip() or ("[Session timed out]" if timed_out else "[No output]"),
+            turn_id=turn_id,
         )

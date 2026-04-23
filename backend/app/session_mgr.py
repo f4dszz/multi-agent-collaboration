@@ -18,8 +18,10 @@ import uuid
 from dataclasses import dataclass
 from typing import Callable
 
+from .permissions import PermissionResolution, new_permission_request
 from .providers import ProviderRegistry, default_registry
-from .providers.base import LineParser, OnChunk, ProviderResult
+from .providers.base import LineParser, OnChunk, ProviderEvent, ProviderEventHandler, ProviderResult
+from .turn_runtime import ActiveTurn
 
 logger = logging.getLogger("session_mgr")
 
@@ -38,6 +40,7 @@ class Session:
     provider: Provider
     cli_session_id: str
     workspace: str
+    room_id: str = ""
     room_dir: str = ""  # runtime/rooms/{room_id} — for mailbox access
     alive: bool = True
     round_count: int = 0
@@ -49,6 +52,7 @@ class SessionManager:
     def __init__(self, provider_registry: ProviderRegistry | None = None) -> None:
         self._sessions: dict[str, Session] = {}
         self._active_procs: dict[str, subprocess.Popen] = {}
+        self._active_turns: dict[str, ActiveTurn] = {}
         self._procs_lock = threading.Lock()
         self._on_cli_session_update: Callable[[str, str], None] | None = None
         self.provider_registry = provider_registry or default_registry
@@ -59,12 +63,19 @@ class SessionManager:
 
     # --- Session CRUD ---
 
-    def create_session(self, role: str, provider: Provider, workspace: str, room_dir: str = "") -> Session:
+    def create_session(
+        self,
+        role: str,
+        provider: Provider,
+        workspace: str,
+        room_id: str = "",
+        room_dir: str = "",
+    ) -> Session:
         session_id = str(uuid.uuid4())[:8]
         cli_session_id = str(uuid.uuid4())
         session = Session(
             session_id=session_id, role=role, provider=provider,
-            cli_session_id=cli_session_id, workspace=workspace,
+            cli_session_id=cli_session_id, workspace=workspace, room_id=room_id,
             room_dir=room_dir,
         )
         self._sessions[session_id] = session
@@ -72,17 +83,19 @@ class SessionManager:
 
     def restore_session(
         self, session_id: str, role: str, provider: str,
-        cli_session_id: str, workspace: str, room_dir: str = "",
+        cli_session_id: str, workspace: str, room_id: str = "", room_dir: str = "",
     ) -> Session:
         if session_id in self._sessions:
             existing = self._sessions[session_id]
+            if room_id and not existing.room_id:
+                existing.room_id = room_id
             # Update room_dir if not set (handles sessions created before this field existed)
             if room_dir and not existing.room_dir:
                 existing.room_dir = room_dir
             return existing
         session = Session(
             session_id=session_id, role=role, provider=provider,
-            cli_session_id=cli_session_id, workspace=workspace,
+            cli_session_id=cli_session_id, workspace=workspace, room_id=room_id,
             room_dir=room_dir,
             round_count=1,
         )
@@ -95,6 +108,9 @@ class SessionManager:
     def list_sessions(self) -> list[Session]:
         return list(self._sessions.values())
 
+    def get_active_turn(self, session_id: str) -> ActiveTurn | None:
+        return self._active_turns.get(session_id)
+
     def mark_dead(self, session_id: str) -> None:
         session = self._sessions.get(session_id)
         if session:
@@ -104,7 +120,9 @@ class SessionManager:
 
     def send_message(
         self, session_id: str, message: str,
-        timeout: int = 600, on_chunk: OnChunk | None = None,
+        timeout: int = 600,
+        on_chunk: OnChunk | None = None,
+        on_event: ProviderEventHandler | None = None,
     ) -> SessionResult:
         session = self._sessions.get(session_id)
         if not session:
@@ -113,15 +131,62 @@ class SessionManager:
         logger.info("Sending message to %s (%s, round %d, %d chars)",
                      session_id, session.provider, session.round_count + 1, len(message))
 
-        provider = self.provider_registry.get(session.provider)
-        result = provider.send(
-            session=session,
-            message=message,
-            timeout=timeout,
-            on_chunk=on_chunk,
-            run_stream=self._run_stream,
-            on_cli_session_update=self._on_cli_session_update,
+        turn_id = f"{session.session_id}:round:{session.round_count + 1}"
+        active_turn = ActiveTurn(
+            turn_id=turn_id,
+            room_id=session.room_id,
+            session_id=session.session_id,
+            provider=session.provider,
+            role=session.role,
         )
+        active_turn.resolver = lambda resolution: self.provider_registry.get(session.provider).resolve_permission(
+            session,
+            resolution.request_id,
+            resolution,
+        )
+        self._active_turns[session.session_id] = active_turn
+
+        def handle_event(event: ProviderEvent) -> None:
+            active_turn.add_event(event)
+            if event.type == "permission_requested" and event.permission_request:
+                request = event.permission_request
+                active_turn.add_permission(
+                    new_permission_request(
+                        request_id=request.request_id,
+                        room_id=session.room_id,
+                        session_id=session.session_id,
+                        provider=session.provider,
+                        turn_id=event.turn_id,
+                        kind=request.kind,
+                        title=request.title,
+                        description=request.description,
+                        payload=request.payload,
+                    )
+                )
+            if on_event:
+                on_event(event)
+
+        provider = self.provider_registry.get(session.provider)
+        try:
+            result = provider.send(
+                session=session,
+                message=message,
+                timeout=timeout,
+                on_chunk=on_chunk,
+                on_event=handle_event,
+                run_stream=self._run_stream,
+                on_cli_session_update=self._on_cli_session_update,
+            )
+        except Exception as exc:
+            active_turn.mark_failed(str(exc))
+            self._active_turns.pop(session.session_id, None)
+            raise
+
+        if result.success:
+            active_turn.mark_completed()
+        else:
+            active_turn.mark_failed(result.output_text)
+        self._active_turns.pop(session.session_id, None)
 
         session.round_count += 1
         if not result.success:
@@ -131,6 +196,26 @@ class SessionManager:
             logger.debug("Session %s send completed successfully", session_id)
         return result
 
+    def resolve_permission(
+        self,
+        session_id: str,
+        request_id: str,
+        decision: str,
+        payload: dict | None = None,
+    ) -> dict:
+        session = self._sessions.get(session_id)
+        if not session:
+            raise ValueError(f"Session not found: {session_id}")
+        active_turn = self._active_turns.get(session_id)
+        if not active_turn:
+            raise ValueError(f"No active turn for session: {session_id}")
+        resolution = PermissionResolution(
+            request_id=request_id,
+            decision=decision,  # type: ignore[arg-type]
+            payload=payload or {},
+        )
+        return active_turn.resolve_permission(resolution)
+
     # --- Process management ---
 
     def kill_active(self, session_id: str) -> bool:
@@ -138,6 +223,12 @@ class SessionManager:
         with self._procs_lock:
             proc = self._active_procs.get(session_id)
         if not proc:
+            session = self._sessions.get(session_id)
+            if session:
+                provider = self.provider_registry.get(session.provider)
+                interrupt = getattr(provider, "interrupt_turn", None)
+                if callable(interrupt):
+                    return bool(interrupt(session))
             return False
         logger.warning("Killing active process for session %s (pid=%s)", session_id, proc.pid)
         try:
@@ -163,6 +254,13 @@ class SessionManager:
                 pass
         with self._procs_lock:
             self._active_procs.clear()
+        for provider in self.provider_registry.list():
+            shutdown = getattr(provider, "shutdown", None)
+            if callable(shutdown):
+                try:
+                    shutdown()
+                except Exception:
+                    pass
 
     # --- 通用流式进程运行器 ---
 

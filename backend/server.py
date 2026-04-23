@@ -192,6 +192,25 @@ class Handler(BaseHTTPRequestHandler):
 
                 self._json_response(snapshot)
 
+            elif (m := re.match(r"^/api/rooms/([^/]+)/permissions/([^/]+)$", path)):
+                room_id = m.group(1)
+                request_id = m.group(2)
+                decision = body.get("decision", "")
+                payload = body.get("payload", {})
+                if decision not in ("allow", "deny", "allow_session", "answer"):
+                    self._json_response({"error": "Invalid permission decision"}, status=400)
+                    return
+                if payload is not None and not isinstance(payload, dict):
+                    self._json_response({"error": "payload must be an object"}, status=400)
+                    return
+                snapshot = router.resolve_permission(
+                    room_id=room_id,
+                    request_id=request_id,
+                    decision=decision,
+                    payload=payload or {},
+                )
+                self._json_response(snapshot)
+
             elif (m := re.match(r"^/api/rooms/([^/]+)/workspace$", path)):
                 room_id = m.group(1)
                 new_workspace = body.get("workspace", "")

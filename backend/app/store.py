@@ -8,9 +8,12 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from .permissions import PermissionRequest, permission_from_row
 
 
 def _now() -> str:
@@ -90,6 +93,7 @@ class Store:
     def delete_room(self, room_id: str) -> None:
         """删除room及其所有关联数据。"""
         with self._lock:
+            self.conn.execute("DELETE FROM permission_requests WHERE room_id = ?", (room_id,))
             self.conn.execute("DELETE FROM messages WHERE room_id = ?", (room_id,))
             self.conn.execute("DELETE FROM sessions WHERE room_id = ?", (room_id,))
             self.conn.execute("DELETE FROM rooms WHERE room_id = ?", (room_id,))
@@ -133,6 +137,68 @@ class Store:
             self.conn.execute(
                 "UPDATE sessions SET cli_session_id = ? WHERE session_id = ?",
                 (cli_session_id, session_id),
+            )
+            self.conn.commit()
+
+    # --- Permission Requests ---
+
+    def add_permission_request(self, request: PermissionRequest) -> None:
+        with self._lock:
+            record = request.to_record()
+            self.conn.execute(
+                """
+                INSERT INTO permission_requests (
+                    request_id, room_id, session_id, provider, turn_id,
+                    status, kind, title, description, payload_json,
+                    created_at, resolved_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record["request_id"],
+                    record["room_id"],
+                    record["session_id"],
+                    record["provider"],
+                    record["turn_id"],
+                    record["status"],
+                    record["kind"],
+                    record["title"],
+                    record["description"],
+                    record["payload_json"],
+                    record["created_at"],
+                    record["resolved_at"],
+                ),
+            )
+            self.conn.commit()
+
+    def list_permission_requests(self, room_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self.conn.execute(
+                """
+                SELECT * FROM permission_requests
+                WHERE room_id = ?
+                ORDER BY created_at ASC
+                """,
+                (room_id,),
+            ).fetchall()
+            return [asdict(permission_from_row(dict(r))) for r in rows]
+
+    def get_permission_request(self, request_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT * FROM permission_requests WHERE request_id = ?",
+                (request_id,),
+            ).fetchone()
+            return asdict(permission_from_row(dict(row))) if row else None
+
+    def resolve_permission_request(self, request_id: str, status: str) -> None:
+        with self._lock:
+            self.conn.execute(
+                """
+                UPDATE permission_requests
+                SET status = ?, resolved_at = ?
+                WHERE request_id = ?
+                """,
+                (status, _now(), request_id),
             )
             self.conn.commit()
 
@@ -207,6 +273,23 @@ CREATE TABLE IF NOT EXISTS messages (
     created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS permission_requests (
+    request_id TEXT PRIMARY KEY,
+    room_id TEXT NOT NULL REFERENCES rooms(room_id),
+    session_id TEXT NOT NULL REFERENCES sessions(session_id),
+    provider TEXT NOT NULL,
+    turn_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    title TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    resolved_at TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_messages_room ON messages(room_id, message_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_room ON sessions(room_id);
+CREATE INDEX IF NOT EXISTS idx_permissions_room ON permission_requests(room_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_permissions_session ON permission_requests(session_id, created_at);
 """

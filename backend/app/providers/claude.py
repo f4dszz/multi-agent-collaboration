@@ -5,9 +5,12 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
+from ..permissions import PermissionResolution
 from .base import (
     CliSessionUpdate,
     OnChunk,
+    ProviderEvent,
+    ProviderEventHandler,
     ProviderResult,
     ProviderSession,
     ProviderStatus,
@@ -54,6 +57,7 @@ class ClaudeProvider:
         message: str,
         timeout: int,
         on_chunk: OnChunk | None,
+        on_event: ProviderEventHandler | None,
         run_stream: StreamRunner,
         on_cli_session_update: CliSessionUpdate | None,
     ) -> ProviderResult:
@@ -82,6 +86,7 @@ class ClaudeProvider:
         if session.room_dir and str(Path(session.room_dir).resolve()) != str(Path(session.workspace).resolve()):
             command.extend(["--add-dir", session.room_dir])
 
+        turn_id = f"{session.session_id}:round:{session.round_count + 1}"
         final_result: list[str] = []
 
         def parser(event: dict) -> str | None:
@@ -92,6 +97,12 @@ class ClaudeProvider:
                         text = block.get("text", "")
                         if text and on_chunk:
                             on_chunk("text", text)
+                        if text and on_event:
+                            on_event(ProviderEvent(
+                                type="message_delta",
+                                turn_id=turn_id,
+                                content=text,
+                            ))
                         return text
                     if block.get("type") == "tool_use":
                         name = block.get("name", "unknown")
@@ -104,6 +115,13 @@ class ClaudeProvider:
                                 summary = f"[Reading: {inp['file_path']}]"
                         if on_chunk:
                             on_chunk("tool", summary)
+                        if on_event:
+                            on_event(ProviderEvent(
+                                type="tool_event",
+                                turn_id=turn_id,
+                                content=summary,
+                                metadata={"tool_name": name, "input": inp if isinstance(inp, dict) else {}},
+                            ))
             elif etype == "result":
                 final_result.append(event.get("result", ""))
             return None
@@ -126,4 +144,13 @@ class ClaudeProvider:
             duration_ms=duration_ms,
             success=(rc == 0),
             output_text=output.strip() or "[No output]",
+            turn_id=turn_id,
         )
+
+    def resolve_permission(
+        self,
+        session: ProviderSession,
+        request_id: str,
+        resolution: PermissionResolution,
+    ) -> dict:
+        raise NotImplementedError("Claude provider permission resolution is not supported yet")
